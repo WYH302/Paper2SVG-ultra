@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+title: "Paper2SVG-ultra: Reference-Driven Editable Academic Overview SVG Generator"
+message: "If you find Paper2SVG-ultra helpful in preparing your academic figures, please cite this repository."
+type: software
+authors:
+  - alias: "WYH302"
+repository-code: "https://github.com/WYH302/Paper2SVG-ultra"
+license: MIT
+version: "1.0.0"
+date-released: "2026-11-24"
+keywords:
+  - academic-figures
+  - scientific-illustration
+  - svg-generation
+  - multimodal-llm
+  - research-tools

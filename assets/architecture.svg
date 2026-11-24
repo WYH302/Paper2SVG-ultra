@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 540" width="1600" height="540">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto">
+      <path d="M0,1.2 L9,5 L0,8.8 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-accent" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto">
+      <path d="M0,1.2 L9,5 L0,8.8 Z" fill="#2563EB"/>
+    </marker>
+    <marker id="arrow-loop" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto">
+      <path d="M0,1.2 L9,5 L0,8.8 Z" fill="#D97706"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto">
+      <path d="M0,1.2 L9,5 L0,8.8 Z" fill="#16A34A"/>
+    </marker>
+    <filter id="card-shadow" x="-6%" y="-6%" width="112%" height="118%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#0F172A" flood-opacity="0.06"/>
+    </filter>
+  </defs>
+  <style>
+    .hdr { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 24px; font-weight: 700; fill: #0F172A; }
+    .subhdr { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 16px; font-weight: 600; fill: #475569; }
+    .pill-title { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 18px; font-weight: 700; fill: #0F172A; }
+    .card-title { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 19px; font-weight: 700; fill: #0F172A; }
+    .body-txt { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 500; fill: #334155; }
+    .tag-txt { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #1E40AF; }
+    .tag-warm { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #B45309; }
+    .edge-txt { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 600; fill: #475569; }
+  </style>
+
+  <!-- Clean white background -->
+  <rect x="0" y="0" width="1600" height="540" fill="#FFFFFF"/>
+
+  <!-- Top Stage Header Pills (Borderless Pastel Style) -->
+  <g id="layer-headers">
+    <rect x="36" y="24" width="212" height="44" rx="12" fill="#F1F5F9"/>
+    <text x="142" y="46" text-anchor="middle" dominant-baseline="central" class="pill-title">Inputs</text>
+
+    <rect x="276" y="24" width="286" height="44" rx="12" fill="#DBEAFE"/>
+    <text x="419" y="46" text-anchor="middle" dominant-baseline="central" class="pill-title">1-2. Distill &amp; Subtract</text>
+
+    <rect x="590" y="24" width="268" height="44" rx="12" fill="#DBEAFE"/>
+    <text x="724" y="46" text-anchor="middle" dominant-baseline="central" class="pill-title">3-4. Blueprint &amp; Anchor</text>
+
+    <rect x="886" y="24" width="388" height="44" rx="12" fill="#FEF3C7"/>
+    <text x="1080" y="46" text-anchor="middle" dominant-baseline="central" class="pill-title">5-6. Zero-GPU Hybrid SVG &amp; Critic</text>
+
+    <rect x="1302" y="24" width="262" height="44" rx="12" fill="#DCFCE7"/>
+    <text x="1433" y="46" text-anchor="middle" dominant-baseline="central" class="pill-title">Editable Delivery</text>
+  </g>
+
+  <!-- Column 1: Dual Inputs -->
+  <g id="layer-inputs" filter="url(#card-shadow)">
+    <rect x="36" y="106" width="212" height="148" rx="14" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <text x="142" y="148" text-anchor="middle" dominant-baseline="central" class="card-title">Full Paper PDF</text>
+    <text x="142" y="182" text-anchor="middle" dominant-baseline="central" class="body-txt">Title · Abstract</text>
+    <text x="142" y="206" text-anchor="middle" dominant-baseline="central" class="body-txt">Full Method Sections</text>
+
+    <rect x="36" y="294" width="212" height="148" rx="14" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.5"/>
+    <text x="142" y="336" text-anchor="middle" dominant-baseline="central" class="card-title">Reference Folder</text>
+    <text x="142" y="370" text-anchor="middle" dominant-baseline="central" class="body-txt">2-5 Top-Venue Figs</text>
+    <text x="142" y="394" text-anchor="middle" dominant-baseline="central" class="body-txt">Borrow Style, Not Text</text>
+  </g>
+
+  <!-- Column 2: Stage 1 & Stage 2 -->
+  <g id="layer-distill" filter="url(#card-shadow)">
+    <rect x="276" y="106" width="286" height="148" rx="14" fill="#EFF6FF"/>
+    <rect x="296" y="122" width="128" height="24" rx="8" fill="#DBEAFE"/>
+    <text x="360" y="134" text-anchor="middle" dominant-baseline="central" class="tag-txt">STAGE 1 · PDF</text>
+    <text x="419" y="172" text-anchor="middle" dominant-baseline="central" class="card-title">Method Abstraction</text>
+    <text x="419" y="202" text-anchor="middle" dominant-baseline="central" class="body-txt">Drop Refs/Related Work</text>
+    <text x="419" y="226" text-anchor="middle" dominant-baseline="central" class="body-txt">Cap: 3-4 Stages · 6-9 Modules</text>
+
+    <rect x="276" y="294" width="286" height="148" rx="14" fill="#EFF6FF"/>
+    <rect x="296" y="310" width="142" height="24" rx="8" fill="#DBEAFE"/>
+    <text x="367" y="322" text-anchor="middle" dominant-baseline="central" class="tag-txt">STAGE 2 · ART DIR</text>
+    <text x="419" y="360" text-anchor="middle" dominant-baseline="central" class="card-title">Style DNA Extractor</text>
+    <text x="419" y="390" text-anchor="middle" dominant-baseline="central" class="body-txt">True Palette &amp; Border Style</text>
+    <text x="419" y="414" text-anchor="middle" dominant-baseline="central" class="body-txt">Strict Content Isolation</text>
+  </g>
+
+  <!-- Column 3: Stage 3 & Stage 4 -->
+  <g id="layer-blueprint" filter="url(#card-shadow)">
+    <rect x="590" y="106" width="268" height="148" rx="14" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.6"/>
+    <rect x="610" y="122" width="154" height="24" rx="8" fill="#DBEAFE"/>
+    <text x="687" y="134" text-anchor="middle" dominant-baseline="central" class="tag-txt">STAGE 3 · SCHEMA</text>
+    <text x="724" y="172" text-anchor="middle" dominant-baseline="central" class="card-title">Visual Architect</text>
+    <text x="724" y="202" text-anchor="middle" dominant-baseline="central" class="body-txt">6 Story Archetypes · 12-24 Labels</text>
+    <text x="724" y="226" text-anchor="middle" dominant-baseline="central" class="body-txt">3-6 Hero Visuals · 35%+ Air</text>
+
+    <rect x="590" y="294" width="268" height="148" rx="14" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.6"/>
+    <rect x="610" y="310" width="150" height="24" rx="8" fill="#DBEAFE"/>
+    <text x="685" y="322" text-anchor="middle" dominant-baseline="central" class="tag-txt">STAGE 4 · ANCHOR</text>
+    <text x="724" y="360" text-anchor="middle" dominant-baseline="central" class="card-title">Stage-1 Visual Draft</text>
+    <text x="724" y="390" text-anchor="middle" dominant-baseline="central" class="body-txt">Responses image_generation</text>
+    <text x="724" y="414" text-anchor="middle" dominant-baseline="central" class="body-txt">Smart Wide-Banner Trim (~2.3:1)</text>
+  </g>
+
+  <!-- Column 4: Stage 5 & Stage 6 (Core Innovation Highlight) -->
+  <g id="layer-hybrid" filter="url(#card-shadow)">
+    <rect x="886" y="106" width="388" height="148" rx="14" fill="#FFFBEB" stroke="#F59E0B" stroke-width="2"/>
+    <rect x="906" y="122" width="184" height="24" rx="8" fill="#FEF3C7"/>
+    <text x="998" y="134" text-anchor="middle" dominant-baseline="central" class="tag-warm">STAGE 5 · HYBRID SVG</text>
+    <text x="1080" y="172" text-anchor="middle" dominant-baseline="central" class="card-title">Ruler Crop + Masked SVG Build</text>
+    <text x="1080" y="202" text-anchor="middle" dominant-baseline="central" class="body-txt">0-1000 Grid Crop + Border Flood-Fill BG Removal</text>
+    <text x="1080" y="226" text-anchor="middle" dominant-baseline="central" class="body-txt">Vector Cards/Text/Arrows + Draggable HD Assets</text>
+
+    <rect x="886" y="294" width="388" height="148" rx="14" fill="#FFFBEB" stroke="#F59E0B" stroke-width="2"/>
+    <rect x="906" y="310" width="180" height="24" rx="8" fill="#FEF3C7"/>
+    <text x="996" y="322" text-anchor="middle" dominant-baseline="central" class="tag-warm">STAGE 6 · AUDIT LOOP</text>
+    <text x="1080" y="360" text-anchor="middle" dominant-baseline="central" class="card-title">Hard Linter + Dual-Res Critic</text>
+    <text x="1080" y="390" text-anchor="middle" dominant-baseline="central" class="body-txt">XML Check · Print pt Floor · Real Text-Width Fit</text>
+    <text x="1080" y="414" text-anchor="middle" dominant-baseline="central" class="body-txt">Full-Res + 700px 2-Col Preview · Asset Guard</text>
+  </g>
+
+  <!-- Column 5: Delivery -->
+  <g id="layer-delivery" filter="url(#card-shadow)">
+    <rect x="1302" y="106" width="262" height="336" rx="16" fill="#F0FDF4" stroke="#22C55E" stroke-width="2"/>
+    <text x="1433" y="152" text-anchor="middle" dominant-baseline="central" class="card-title">final.svg</text>
+    <text x="1433" y="180" text-anchor="middle" dominant-baseline="central" class="body-txt">Self-Contained Editable</text>
+    <text x="1433" y="202" text-anchor="middle" dominant-baseline="central" class="body-txt">Illustrator · Figma · Inkscape</text>
+
+    <line x1="1332" y1="230" x2="1534" y2="230" stroke="#BBF7D0" stroke-width="1.5"/>
+
+    <text x="1433" y="264" text-anchor="middle" dominant-baseline="central" class="card-title">Web Workbench</text>
+    <text x="1433" y="292" text-anchor="middle" dominant-baseline="central" class="body-txt">Bundled svg-edit Canvas</text>
+    <text x="1433" y="314" text-anchor="middle" dominant-baseline="central" class="body-txt">Drag, Retype &amp; Save Back</text>
+
+    <line x1="1332" y1="342" x2="1534" y2="342" stroke="#BBF7D0" stroke-width="1.5"/>
+
+    <text x="1433" y="376" text-anchor="middle" dominant-baseline="central" class="body-txt">2x final.png · 700px 2-Col</text>
+    <text x="1433" y="402" text-anchor="middle" dominant-baseline="central" class="body-txt">qa.md · Resumable schema.md</text>
+  </g>
+
+  <!-- Connectors -->
+  <g id="layer-connectors" fill="none" stroke-width="2.4">
+    <!-- Inputs to Stage 1 & 2 -->
+    <line x1="248" y1="180" x2="270" y2="180" stroke="#475569" marker-end="url(#arrow)"/>
+    <line x1="248" y1="368" x2="270" y2="368" stroke="#475569" marker-end="url(#arrow)"/>
+
+    <!-- Stage 1 & 2 to Stage 3 -->
+    <path d="M562,180 L584,180" stroke="#2563EB" marker-end="url(#arrow-accent)"/>
+    <path d="M562,368 L576,368 L576,204 L584,204" stroke="#2563EB" marker-end="url(#arrow-accent)"/>
+
+    <!-- Stage 3 to Stage 4 -->
+    <line x1="724" y1="254" x2="724" y2="288" stroke="#2563EB" marker-end="url(#arrow-accent)"/>
+
+    <!-- Stage 4 to Stage 5 -->
+    <path d="M858,368 L872,368 L872,180 L880,180" stroke="#2563EB" marker-end="url(#arrow-accent)"/>
+
+    <!-- Stage 5 to Stage 6 -->
+    <line x1="1080" y1="254" x2="1080" y2="288" stroke="#D97706" marker-end="url(#arrow-loop)"/>
+
+    <!-- Critic Loop Arrow (1-3 rounds) -->
+    <path d="M1230,442 L1230,478 L930,478 L930,448" stroke="#D97706" stroke-dasharray="6,4" marker-end="url(#arrow-loop)"/>
+    <rect x="1008" y="464" width="144" height="26" rx="6" fill="#FFFFFF"/>
+    <text x="1080" y="477" text-anchor="middle" dominant-baseline="central" class="edge-txt">1-3 Critic Rounds</text>
+
+    <!-- Stage 6 to Delivery -->
+    <path d="M1274,368 L1288,368 L1288,274 L1296,274" stroke="#16A34A" marker-end="url(#arrow-green)"/>
+  </g>
+
+  <!-- Subtle bottom footnote -->
+  <text x="800" y="518" text-anchor="middle" dominant-baseline="central" class="subhdr">Paper2SVG-ultra · Zero PyTorch / Zero SAM3 / Zero GPU · OpenAI Responses API (SSE Streaming) · MIT License</text>
+</svg>

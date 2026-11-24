@@ -1,0 +1,30 @@
+# Secrets & local private config
+.env
+.env.local
+
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Generated runtime outputs & user uploads
+outputs/
+uploads/
+tests/demo_inputs/
+*.log
+
+# Local personal archival workspace folders (kept private, never pushed)
+experiments/
+paper/
+business/
+others/
+repos/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

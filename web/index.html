@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Paper2SVG-ultra · Top-Venue Academic Paper Overview SVG Workbench</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --ok: #16a34a;
+      --warn: #d97706;
+      --err: #dc2626;
+      --radius: 12px;
+      --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--font);
+      line-height: 1.5;
+    }
+    header {
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid #1e293b;
+    }
+    header h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+    header .badges { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+    .badge {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #cbd5e1;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    .badge.ok { border-color: #16a34a; color: #86efac; }
+    .layout {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 20px;
+      padding: 20px 24px;
+      max-width: 1680px;
+      margin: 0 auto;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
+    label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 12px 0 4px; }
+    input[type="text"], select, textarea {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: var(--font);
+      font-size: 13px;
+      background: #fff;
+      color: var(--ink);
+    }
+    .file-box {
+      border: 1.5px dashed #cbd5e1;
+      border-radius: 10px;
+      padding: 12px;
+      background: #f8fafc;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .file-box input { width: 100%; font-size: 12px; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .check-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-weight: 600;
+      font-size: 13px;
+      font-family: var(--font);
+      transition: background 0.15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; width: 100%; margin-top: 14px; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+    .btn-ghost { background: #f1f5f9; color: var(--ink); padding: 7px 12px; font-size: 12px; }
+    .btn-ghost:hover { background: #e2e8f0; }
+    .btn-ok { background: var(--ok); color: #fff; padding: 7px 14px; font-size: 12px; }
+    .stepper {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .step-pill {
+      padding: 8px 6px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 11px;
+      text-align: center;
+      background: #f8fafc;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .step-pill.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+    .step-pill.done { border-color: #86efac; background: #f0fdf4; color: var(--ok); }
+    .tabs {
+      display: flex;
+      gap: 6px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .tab-btn {
+      background: transparent;
+      color: var(--muted);
+      padding: 6px 12px;
+      border-radius: 7px;
+      font-size: 12px;
+    }
+    .tab-btn.active { background: var(--accent-soft); color: var(--accent); }
+    .tab-actions { margin-left: auto; display: flex; gap: 8px; }
+    .stage-canvas {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #ffffff;
+      min-height: 440px;
+      padding: 16px;
+      overflow: auto;
+    }
+    .svg-preview-wrap {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 400px;
+    }
+    .svg-preview-wrap img, .svg-preview-wrap svg {
+      max-width: 100%;
+      height: auto;
+      border: 1px solid #f1f5f9;
+      border-radius: 6px;
+    }
+    .compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .compare-grid figure { margin: 0; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+    .compare-grid figcaption { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+    .compare-grid img { width: 100%; height: auto; border-radius: 4px; }
+    .twocol-frame {
+      max-width: 700px;
+      margin: 0 auto;
+      border: 1px dashed #94a3b8;
+      padding: 14px;
+      background: #fff;
+    }
+    .twocol-caption { font-size: 11px; color: var(--muted); text-align: center; margin-top: 8px; }
+    .log-box {
+      margin-top: 14px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      padding: 12px;
+      border-radius: 8px;
+      max-height: 170px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    .history-list {
+      margin-top: 14px;
+      max-height: 220px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .history-item {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .history-item:hover { background: var(--accent-soft); border-color: #bfdbfe; }
+    .history-item.active { border-color: var(--accent); background: var(--accent-soft); }
+    pre.doc-view {
+      white-space: pre-wrap;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px;
+      margin: 0;
+      color: #1e293b;
+    }
+    iframe#svgEditFrame {
+      width: 100%;
+      height: 680px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Paper2SVG-ultra · 顶会论文总体框架图可编辑 SVG 工作台</h1>
+    <div class="badges">
+      <span class="badge" id="badgeModels">Loading models...</span>
+      <span class="badge ok" id="badgeMode">Hybrid 顶会插画 SVG · 0 GPU</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Left Config Panel -->
+    <aside>
+      <div class="card">
+        <h2>1. 输入论文 PDF 与参考图文件夹</h2>
+        <form id="runForm">
+          <label>整篇论文 PDF（必选）</label>
+          <div class="file-box">
+            <input type="file" id="paperPdf" accept=".pdf" required />
+          </div>
+
+          <label>参考图文件夹（上传多张顶会参考图，借骨架与画风）</label>
+          <div class="file-box">
+            <input type="file" id="refFolder" webkitdirectory directory multiple accept="image/*" />
+            <div id="refCountHint" style="margin-top:4px;color:var(--accent);font-weight:600;"></div>
+            <div style="margin-top:6px;">或直接填本机参考图文件夹路径：</div>
+            <input type="text" id="refsDirPath" placeholder="例如：D:\refs\neurips_figs" style="margin-top:4px;" />
+          </div>
+
+          <div class="row2">
+            <div>
+              <label>顶会视觉原型（6大原型）</label>
+              <select id="archetype">
+                <option value="">自动根据论文故事决策（推荐）</option>
+              </select>
+            </div>
+            <div>
+              <label>图内标签语言</label>
+              <select id="lang">
+                <option value="auto">自动跟随论文</option>
+                <option value="en">English (顶会标准)</option>
+                <option value="zh">中文 + 英文缩写</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row2">
+            <div>
+              <label>主推理 / SVG 模型</label>
+              <input type="text" id="mainModel" placeholder="e.g. gpt-5.4" />
+            </div>
+            <div>
+              <label>推理强度 (Reasoning)</label>
+              <select id="reasoningEffort">
+                <option value="xhigh">xhigh（顶配最强）</option>
+                <option value="high" selected>high（推荐）</option>
+                <option value="medium">medium</option>
+                <option value="none">关闭</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row2">
+            <div>
+              <label>Stage-1 生图模型（留空用默认）</label>
+              <input type="text" id="imageModel" placeholder="留空或填 gpt-image-2 等" />
+            </div>
+            <div>
+              <label>SVG 重建模式</label>
+              <select id="svgMode">
+                <option value="hybrid_rich" selected>混合顶会插画 SVG（推荐 · 保留高清图/3D）</option>
+                <option value="pure_vector">纯几何矢量 SVG</option>
+              </select>
+            </div>
+          </div>
+
+          <label>视觉 Critic + 硬规则 Linter 精修轮数</label>
+          <select id="criticRounds">
+            <option value="2" selected>2 轮（推荐 · 质量与速度平衡）</option>
+            <option value="3">3 轮（极致打磨）</option>
+            <option value="1">1 轮（快速验证）</option>
+          </select>
+
+          <label class="check-row">
+            <input type="checkbox" id="pauseAfterSchema" />
+            生成视觉蓝图 (`schema.md`) 后暂停，让我确认/微调再出图
+          </label>
+
+          <button type="submit" class="btn-primary" id="startBtn">开始生成顶会可编辑 SVG</button>
+        </form>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <h2 style="margin:0;">历史任务</h2>
+          <button class="btn-ghost" type="button" onclick="refreshRuns()">刷新</button>
+        </div>
+        <div class="history-list" id="historyList">
+          <div style="color:var(--muted);font-size:12px;">暂无历史运行记录</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Right Workspace Panel -->
+    <main>
+      <div class="card">
+        <div class="stepper" id="stepper">
+          <div class="step-pill" data-stage="1">① PDF 方法提纯</div>
+          <div class="step-pill" data-stage="2">② 参考图 Style DNA</div>
+          <div class="step-pill" data-stage="3">③ 视觉蓝图 Schema</div>
+          <div class="step-pill" data-stage="4">④ Stage-1 构图锚点</div>
+          <div class="step-pill" data-stage="5">⑤ 5层纯 SVG 重建</div>
+          <div class="step-pill" data-stage="6">⑥ Linter + 视觉精修</div>
+        </div>
+
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="svg">最终可编辑 SVG</button>
+          <button class="tab-btn" data-tab="twocol">双栏印刷实宽模拟 (700px)</button>
+          <button class="tab-btn" data-tab="compare">草图 vs 终稿对比</button>
+          <button class="tab-btn" data-tab="schema">视觉蓝图 Schema (可编辑续跑)</button>
+          <button class="tab-btn" data-tab="docs">Style DNA / 论文分析 / QA</button>
+          <button class="tab-btn" data-tab="editor">在线拖拽精修 (svg-edit)</button>
+          <div class="tab-actions">
+            <a id="downloadSvgBtn" class="btn-ghost hidden" download="final.svg" style="text-decoration:none;">下载 .svg</a>
+            <a id="downloadPngBtn" class="btn-ghost hidden" download="final.png" style="text-decoration:none;">下载高清 .png</a>
+          </div>
+        </div>
+
+        <!-- Tab: Final SVG -->
+        <div id="tab-svg" class="stage-canvas">
+          <div class="svg-preview-wrap" id="svgPreviewWrap">
+            <div style="color:var(--muted);font-size:13px;">上传论文 PDF 与参考图文件夹，点击左侧按钮即可生成顶会级可编辑 SVG。</div>
+          </div>
+        </div>
+
+        <!-- Tab: 2-Column Print Simulation -->
+        <div id="tab-twocol" class="stage-canvas hidden">
+          <div class="twocol-frame" id="twocolWrap">
+            <div style="color:var(--muted);font-size:13px;text-align:center;">完成后此处将以双栏论文实际 7 英寸宽度展示可读性检查效果。</div>
+          </div>
+        </div>
+
+        <!-- Tab: Compare -->
+        <div id="tab-compare" class="stage-canvas hidden">
+          <div class="compare-grid" id="compareWrap">
+            <div style="color:var(--muted);font-size:13px;">完成后此处对比 Stage-1 构图锚图与最终纯 SVG 渲染效果。</div>
+          </div>
+        </div>
+
+        <!-- Tab: Editable Schema -->
+        <div id="tab-schema" class="stage-canvas hidden">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:12px;color:var(--muted);">可修改布局、模块名称或 [EXACT TEXT INVENTORY]，再直接从 Stage 4 续跑出图：</span>
+            <button class="btn-ok" type="button" id="resumeSchemaBtn">保存蓝图并从 Stage 4 续跑</button>
+          </div>
+          <textarea id="schemaEditor" rows="24" placeholder="等待 Stage 3 生成 schema.md..."></textarea>
+        </div>
+
+        <!-- Tab: Docs -->
+        <div id="tab-docs" class="stage-canvas hidden">
+          <div style="display:flex;gap:8px;margin-bottom:10px;">
+            <button class="btn-ghost" type="button" onclick="loadDocTab('qa.md')">QA 质检报告</button>
+            <button class="btn-ghost" type="button" onclick="loadDocTab('style_guide.md')">Style DNA</button>
+            <button class="btn-ghost" type="button" onclick="loadDocTab('paper_method.md')">论文解析</button>
+          </div>
+          <pre class="doc-view" id="docView">暂无内容</pre>
+        </div>
+
+        <!-- Tab: Embedded svg-edit -->
+        <div id="tab-editor" class="stage-canvas hidden">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <span style="font-size:12px;color:var(--muted);">直接在浏览器中拖拽模块、修改文字与颜色，满意后点击保存即可更新 final.svg：</span>
+            <div style="display:flex;gap:8px;">
+              <button class="btn-ghost" type="button" onclick="pushSvgToEditor()">重新载入 final.svg</button>
+              <button class="btn-ok" type="button" onclick="saveSvgFromEditor()">保存修改到 final.svg</button>
+            </div>
+          </div>
+          <iframe id="svgEditFrame" title="Embedded SVG-Edit"></iframe>
+        </div>
+
+        <div class="log-box" id="logBox">Paper2SVG-ultra 就绪。</div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    let currentJobId = null;
+    let currentSvgText = "";
+    let svgEditUrl = null;
+    let eventSource = null;
+
+    function log(msg) {
+      const box = document.getElementById("logBox");
+      box.textContent += "\n" + msg;
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function setStage(stageNum, isDone = false) {
+      document.querySelectorAll(".step-pill").forEach(el => {
+        const s = Number(el.dataset.stage);
+        el.classList.remove("active", "done");
+        if (isDone || s < stageNum) el.classList.add("done");
+        else if (s === stageNum) el.classList.add("active");
+      });
+    }
+
+    async function init() {
+      const res = await fetch("/api/config");
+      const cfg = await res.json();
+      document.getElementById("mainModel").value = cfg.main_model || "gpt-5.4";
+      document.getElementById("reasoningEffort").value = cfg.reasoning_effort || "high";
+      document.getElementById("imageModel").value = cfg.image_tool_model || "";
+      document.getElementById("svgMode").value = cfg.svg_mode || "hybrid_rich";
+      document.getElementById("criticRounds").value = String(cfg.critic_rounds || 2);
+      const imgLabel = cfg.image_tool_model || "default image_gen";
+      document.getElementById("badgeModels").textContent = `${cfg.main_model} (${cfg.reasoning_effort || "high"}) + ${imgLabel}`;
+      svgEditUrl = cfg.svg_edit_url;
+
+      const sel = document.getElementById("archetype");
+      (cfg.archetypes || []).forEach(a => {
+        const opt = document.createElement("option");
+        opt.value = a.key;
+        opt.textContent = `${a.zh_name} (${a.key})`;
+        sel.appendChild(opt);
+      });
+
+      if (svgEditUrl) {
+        document.getElementById("svgEditFrame").src = svgEditUrl;
+      }
+      refreshRuns();
+    }
+
+    async function refreshRuns() {
+      const res = await fetch("/api/runs");
+      const data = await res.json();
+      const list = document.getElementById("historyList");
+      if (!data.runs || data.runs.length === 0) {
+        list.innerHTML = '<div style="color:var(--muted);font-size:12px;">暂无历史运行记录</div>';
+        return;
+      }
+      list.innerHTML = "";
+      data.runs.forEach(r => {
+        const div = document.createElement("div");
+        div.className = "history-item" + (r.job_id === currentJobId ? " active" : "");
+        div.innerHTML = `<div><strong>${r.paper_name}</strong><div style="font-size:11px;color:var(--muted);">${r.archetype || "auto"} · ${r.status}</div></div><span style="font-size:11px;color:var(--muted);">${r.created_at.slice(5,16)}</span>`;
+        div.onclick = () => loadRun(r.job_id);
+        list.appendChild(div);
+      });
+    }
+
+    async function loadRun(jobId) {
+      currentJobId = jobId;
+      refreshRuns();
+      const cacheBust = `?t=${Date.now()}`;
+
+      // Load schema if present
+      const schRes = await fetch(`/api/runs/${jobId}/artifacts/schema.md${cacheBust}`);
+      if (schRes.ok) document.getElementById("schemaEditor").value = await schRes.text();
+
+      // Load final.svg if present
+      const svgRes = await fetch(`/api/runs/${jobId}/artifacts/final.svg${cacheBust}`);
+      if (svgRes.ok) {
+        currentSvgText = await svgRes.text();
+        document.getElementById("svgPreviewWrap").innerHTML = currentSvgText;
+        const dlSvg = document.getElementById("downloadSvgBtn");
+        dlSvg.href = `/api/runs/${jobId}/artifacts/final.svg`;
+        dlSvg.classList.remove("hidden");
+        const dlPng = document.getElementById("downloadPngBtn");
+        dlPng.href = `/api/runs/${jobId}/artifacts/final.png`;
+        dlPng.classList.remove("hidden");
+
+        document.getElementById("twocolWrap").innerHTML = `
+          <img src="/api/runs/${jobId}/artifacts/print_preview_2col.png${cacheBust}" style="width:100%;height:auto;" />
+          <div class="twocol-caption">模拟 7 英寸双栏顶会论文实宽预览（700px）—— 此时看不清的字必须放大或删减</div>
+        `;
+        document.getElementById("compareWrap").innerHTML = `
+          <figure><figcaption>Stage-1 视觉构图锚点 (stage1_draft.png)</figcaption><img src="/api/runs/${jobId}/artifacts/stage1_draft.png${cacheBust}" /></figure>
+          <figure><figcaption>最终可编辑纯 SVG 渲染 (final.png)</figcaption><img src="/api/runs/${jobId}/artifacts/final.png${cacheBust}" /></figure>
+        `;
+        setStage(6, true);
+      }
+      loadDocTab("qa.md");
+    }
+
+    async function loadDocTab(filename) {
+      if (!currentJobId) return;
+      const r = await fetch(`/api/runs/${currentJobId}/artifacts/${filename}?t=${Date.now()}`);
+      document.getElementById("docView").textContent = r.ok ? await r.text() : `尚无 ${filename}`;
+    }
+
+    function connectSSE(jobId) {
+      if (eventSource) eventSource.close();
+      eventSource = new EventSource(`/api/runs/${jobId}/events`);
+      eventSource.addEventListener("progress", e => {
+        const d = JSON.parse(e.data);
+        if (d.stage) setStage(d.stage, false);
+        log(`[Stage ${d.stage || "-"}] ${d.message}`);
+      });
+      eventSource.addEventListener("done", e => {
+        const d = JSON.parse(e.data);
+        log(`[DONE] status=${d.status} elapsed=${d.elapsed_seconds || 0}s`);
+        document.getElementById("startBtn").disabled = false;
+        eventSource.close();
+        loadRun(jobId);
+        if (d.status === "paused_after_schema") switchTab("schema");
+      });
+      eventSource.addEventListener("error", e => {
+        let errText = "连接中断或任务运行出错，请查看日志。";
+        try {
+          const d = JSON.parse(e.data);
+          errText = d.error || errText;
+          log(`[ERROR] ${errText}`);
+        } catch {
+          log("[ERROR] Connection closed.");
+        }
+        document.getElementById("svgPreviewWrap").innerHTML =
+          `<div style="color:var(--err);font-size:13px;max-width:680px;white-space:pre-wrap;padding:16px;border:1px solid #fecaca;background:#fef2f2;border-radius:8px;"><strong>运行失败：</strong>\n${errText}</div>`;
+        document.getElementById("startBtn").disabled = false;
+        eventSource.close();
+      });
+    }
+
+    const IMG_EXT_RE = /\.(png|jpe?g|webp|bmp)$/i;
+    document.getElementById("refFolder").addEventListener("change", e => {
+      const imgs = Array.from(e.target.files || []).filter(f => IMG_EXT_RE.test(f.name));
+      document.getElementById("refCountHint").textContent = imgs.length
+        ? `已识别 ${imgs.length} 张参考图（将自动过滤非图片文件）`
+        : "未检测到图片文件";
+    });
+
+    document.getElementById("runForm").addEventListener("submit", async e => {
+      e.preventDefault();
+      const pdf = document.getElementById("paperPdf").files[0];
+      if (!pdf) return alert("请先选择论文 PDF 文件！");
+
+      const fd = new FormData();
+      fd.append("paper_pdf", pdf);
+      const refs = Array.from(document.getElementById("refFolder").files || []).filter(f => IMG_EXT_RE.test(f.name));
+      for (const f of refs) fd.append("ref_images", f);
+      fd.append("refs_dir_path", document.getElementById("refsDirPath").value.trim());
+      fd.append("lang", document.getElementById("lang").value);
+      fd.append("archetype", document.getElementById("archetype").value);
+      fd.append("critic_rounds", document.getElementById("criticRounds").value);
+      fd.append("main_model", document.getElementById("mainModel").value.trim());
+      fd.append("reasoning_effort", document.getElementById("reasoningEffort").value);
+      fd.append("image_model", document.getElementById("imageModel").value.trim());
+      fd.append("svg_mode", document.getElementById("svgMode").value);
+      fd.append("pause_after_schema", document.getElementById("pauseAfterSchema").checked ? "true" : "false");
+
+      document.getElementById("startBtn").disabled = true;
+      document.getElementById("logBox").textContent = "提交任务中...";
+      setStage(1, false);
+
+      const res = await fetch("/api/run", { method: "POST", body: fd });
+      if (!res.ok) {
+        log("[ERROR] " + await res.text());
+        document.getElementById("startBtn").disabled = false;
+        return;
+      }
+      const data = await res.json();
+      currentJobId = data.job_id;
+      log(`任务已启动: ${currentJobId}`);
+      refreshRuns();
+      connectSSE(currentJobId);
+    });
+
+    document.getElementById("resumeSchemaBtn").addEventListener("click", async () => {
+      if (!currentJobId) return alert("请先选择一个任务！");
+      const schemaMd = document.getElementById("schemaEditor").value;
+      document.getElementById("startBtn").disabled = true;
+      log("保存 schema.md 并从 Stage 4 续跑...");
+      setStage(4, false);
+      const res = await fetch(`/api/runs/${currentJobId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_stage: 4,
+          schema_md: schemaMd,
+          critic_rounds: Number(document.getElementById("criticRounds").value),
+          main_model: document.getElementById("mainModel").value.trim(),
+          reasoning_effort: document.getElementById("reasoningEffort").value,
+          image_model: document.getElementById("imageModel").value.trim(),
+          svg_mode: document.getElementById("svgMode").value,
+        }),
+      });
+      if (res.ok) connectSSE(currentJobId);
+      else {
+        log("[ERROR] " + await res.text());
+        document.getElementById("startBtn").disabled = false;
+      }
+    });
+
+    function pushSvgToEditor() {
+      if (!currentSvgText) return alert("当前任务尚未生成 final.svg");
+      const frame = document.getElementById("svgEditFrame");
+      const win = frame.contentWindow;
+      if (win && win.svgEditor && typeof win.svgEditor.loadFromString === "function") {
+        win.svgEditor.loadFromString(currentSvgText);
+        log("已将 final.svg 载入内置 SVG 编辑器。");
+      } else if (win && win.svgCanvas && typeof win.svgCanvas.setSvgString === "function") {
+        win.svgCanvas.setSvgString(currentSvgText);
+        log("已将 final.svg 载入内置 SVG 编辑器。");
+      } else {
+        alert("编辑器尚在初始化，请稍等 1 秒再点击「重新载入 final.svg」。");
+      }
+    }
+
+    async function saveSvgFromEditor() {
+      if (!currentJobId) return;
+      const win = document.getElementById("svgEditFrame").contentWindow;
+      let edited = "";
+      if (win && win.svgEditor && win.svgEditor.svgCanvas && typeof win.svgEditor.svgCanvas.getSvgString === "function") {
+        edited = win.svgEditor.svgCanvas.getSvgString();
+      } else if (win && win.svgCanvas && typeof win.svgCanvas.getSvgString === "function") {
+        edited = win.svgCanvas.getSvgString();
+      }
+      if (!edited) return alert("无法从编辑器读取 SVG 内容");
+      const res = await fetch(`/api/runs/${currentJobId}/save-svg`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ svg_code: edited }),
+      });
+      if (res.ok) {
+        log("手动精修已保存至 final.svg 并同步刷新高清 PNG 与双栏预览！");
+        loadRun(currentJobId);
+      } else {
+        alert("保存失败: " + await res.text());
+      }
+    }
+
+    function switchTab(name) {
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+      document.querySelectorAll("[id^='tab-']").forEach(div => div.classList.toggle("hidden", div.id !== `tab-${name}`));
+      if (name === "editor" && currentSvgText) setTimeout(pushSvgToEditor, 350);
+    }
+
+    document.querySelectorAll(".tab-btn").forEach(btn => {
+      btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+    });
+
+    init();
+  </script>
+</body>
+</html>
