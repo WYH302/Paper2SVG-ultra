@@ -13,7 +13,30 @@
 
 [English](README.md) | **简体中文**
 
+<br/>
+
+<img src="assets/showcase/borrowedsight_hero.png" alt="Paper2SVG-ultra 旗舰级混合可编辑 SVG 效果展示 (BorrowedSight)" width="100%"/>
+
+<sub><b>Paper2SVG-ultra 旗舰实测成图</b> —— 由 <a href="https://github.com/WYH302/BorrowedSight">BorrowedSight</a> 整篇论文 PDF + 参考图文件夹端到端一键生成（<code>1600×712</code> 单文件可编辑混合 <code>final.svg</code>：16 个 3D 等轴测体素/激光雷达/占用栅格高清可拖拽视觉资产 + 100% 纯矢量可改文字、色带、框体与箭头，0 Linter 报错，视觉 Critic 终审 9.2/10）。</sub>
+
 </div>
+
+<details>
+<summary><b>展开查看这张图是如何零 GPU 拆解重建的（16 资产遮罩图 &amp; 700px 双栏印刷实宽预览）</b></summary>
+<br/>
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/showcase/borrowedsight_masked.png" width="100%"/><br/>
+      <sub><b>零 GPU 视觉资产遮罩图</b> —— 通过 0–1000 坐标标尺精准裁切 16 处 3D 激光雷达/体素/风险场高清画面并智能去背嵌入，其余所有分区底色、圆角卡片、箭头与文字全部重建为纯净可编辑矢量 SVG。</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/showcase/borrowedsight_2col.png" width="100%"/><br/>
+      <sub><b>7 英寸双栏印刷实宽模拟图（700px）</b> —— 交付前自动通过双栏真实缩小尺寸可读性审查。</sub>
+    </td>
+  </tr>
+</table>
+</details>
 
 ---
 

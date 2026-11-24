@@ -13,7 +13,30 @@
 
 **English** | [简体中文](README_ZH.md)
 
+<br/>
+
+<img src="assets/showcase/borrowedsight_hero.png" alt="Paper2SVG-ultra Flagship Editable Hybrid SVG Showcase (BorrowedSight)" width="100%"/>
+
+<sub><b>Flagship Output of Paper2SVG-ultra</b> — generated end-to-end from the full PDF + reference figures of <a href="https://github.com/WYH302/BorrowedSight">BorrowedSight</a> (1600×712 editable hybrid <code>final.svg</code>, 16 draggable 3D isometric/LiDAR visual assets + 100% natively editable vector text, cards, and arrows, 0 linter errors, Vision Critic 9.2/10).</sub>
+
 </div>
+
+<details>
+<summary><b>Click to inspect how Paper2SVG-ultra built this figure (Zero-GPU Asset Mask Overlay &amp; 700px 2-Column Print Preview)</b></summary>
+<br/>
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/showcase/borrowedsight_masked.png" width="100%"/><br/>
+      <sub><b>Zero-GPU Asset Mask Overlay</b> — 16 rich 3D LiDAR/voxel/occupancy/risk graphics automatically localized via our 0–1000 coordinate ruler and cropped cleanly with border flood-fill, while every band, box, arrow, and text label is rebuilt as pure editable SVG.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/showcase/borrowedsight_2col.png" width="100%"/><br/>
+      <sub><b>Simulated 7-inch Two-Column Print Preview (700px)</b> — verified programmatically and visually for real-paper legibility before delivery.</sub>
+    </td>
+  </tr>
+</table>
+</details>
 
 ---
 
