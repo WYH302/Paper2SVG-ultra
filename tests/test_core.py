@@ -410,6 +410,8 @@ def test_fastapi_endpoints_and_svgedit() -> None:
     assert cfg["svg_edit_url"] == "/svg-edit/editor/index.html"
     r_edit = client.get("/svg-edit/editor/index.html")
     assert r_edit.status_code == 200
+    r_qr = client.get("/assets/sponsor_wechat.jpg")
+    assert r_qr.status_code == 200 and r_qr.headers["content-type"].startswith("image/jpeg")
     r_runs = client.get("/api/runs")
     assert r_runs.status_code == 200
 

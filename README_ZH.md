@@ -217,4 +217,10 @@ python run.py --paper paper.pdf --out outputs/my_paper --from-stage 4
 
 ## 支持与随缘打赏（可选）
 
-本项目基于 MIT 协议永久免费开源。如果它刚好在截稿前救了你几个小时，点一个 **Star ⭐** 就是最大的鼓励！如果你愿意请作者喝杯咖啡（随缘打赏，想给就给、不给也完全没关系），也欢迎随时通过 Issue / PR 一起把科研绘图做得更好。
+本项目基于 MIT 协议永久免费开源，**完全欢迎白嫖**！如果它刚好在截稿前救了你几个小时，点一个 **Star ⭐** 就是最大的鼓励；如果愿意随缘请作者喝杯咖啡，也欢迎扫码支持（想给就给、不给也完全没关系）：
+
+<div align="center">
+  <img src="assets/sponsor_wechat.jpg" alt="微信赞赏码（自愿随缘）" width="220" style="border-radius:10px;"/>
+  <br/>
+  <sub>微信赞赏码 · 自愿随缘，也欢迎白嫖 ☕</sub>
+</div>

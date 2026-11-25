@@ -215,6 +215,46 @@
       background: #fff;
     }
     .hidden { display: none !important; }
+    .sponsor-fab {
+      position: fixed;
+      right: 18px;
+      bottom: 16px;
+      z-index: 40;
+      background: rgba(15, 23, 42, 0.86);
+      color: #f8fafc;
+      border: 1px solid #334155;
+      border-radius: 999px;
+      padding: 7px 13px;
+      font-size: 12px;
+      font-weight: 600;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.16);
+      opacity: 0.82;
+      transition: opacity 0.15s, transform 0.15s;
+    }
+    .sponsor-fab:hover { opacity: 1; transform: translateY(-1px); background: #0f172a; }
+    .sponsor-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      background: rgba(15, 23, 42, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .sponsor-card {
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 22px;
+      max-width: 310px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+    }
+    .sponsor-card h3 { margin: 0 0 6px; font-size: 15px; color: var(--ink); }
+    .sponsor-card p { margin: 0 0 12px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .sponsor-card img { width: 220px; height: 220px; border-radius: 10px; border: 1px solid var(--border); }
   </style>
 </head>
 <body>
@@ -672,6 +712,31 @@
     });
 
     init();
+  </script>
+
+  <!-- Subtle Corner Sponsor Button & Modal (100% Optional) -->
+  <button type="button" class="sponsor-fab" id="sponsorBtn" title="开源免费，自愿随缘支持">☕ 随缘打赏</button>
+  <div class="sponsor-backdrop hidden" id="sponsorModal" role="dialog" aria-modal="true" aria-label="随缘打赏">
+    <div class="sponsor-card">
+      <h3>☕ 随缘打赏 · 也欢迎白嫖</h3>
+      <p>Paper2SVG-ultra 永久 MIT 免费开源。如果截稿前正好帮上了忙，随缘请杯咖啡；不给也完全没关系，点个 GitHub Star 同样开心！</p>
+      <img src="/assets/sponsor_wechat.jpg" alt="微信赞赏码" />
+      <div style="margin-top:12px;">
+        <button type="button" class="btn-ghost" id="sponsorCloseBtn">关闭</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const btn = document.getElementById("sponsorBtn");
+      const modal = document.getElementById("sponsorModal");
+      const closeBtn = document.getElementById("sponsorCloseBtn");
+      if (!btn || !modal) return;
+      btn.addEventListener("click", () => modal.classList.remove("hidden"));
+      closeBtn.addEventListener("click", () => modal.classList.add("hidden"));
+      modal.addEventListener("click", e => { if (e.target === modal) modal.classList.add("hidden"); });
+      document.addEventListener("keydown", e => { if (e.key === "Escape") modal.classList.add("hidden"); });
+    })();
   </script>
 </body>
 </html>

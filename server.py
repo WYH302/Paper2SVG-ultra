@@ -27,6 +27,7 @@ from paper2svg.svg_renderer import render_dual_preview
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
 WEB_DIR = PROJECT_ROOT / "web"
+ASSETS_DIR = PROJECT_ROOT / "assets"
 
 def _find_svg_edit_dir() -> Optional[Path]:
     for candidate in (
@@ -175,6 +176,14 @@ def _start_pipeline_thread(
 @app.get("/")
 def index_page() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/assets/sponsor_wechat.jpg")
+def get_sponsor_qr() -> FileResponse:
+    qr_path = ASSETS_DIR / "sponsor_wechat.jpg"
+    if not qr_path.is_file():
+        raise HTTPException(status_code=404, detail="Sponsor QR not found")
+    return FileResponse(qr_path, media_type="image/jpeg")
 
 
 @app.get("/api/config")

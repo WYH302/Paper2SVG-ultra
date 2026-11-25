@@ -245,4 +245,10 @@ If Paper2SVG-ultra helps streamline your paper writing, feel free to cite it:
 
 ## Support / Sponsor (Optional)
 
-Paper2SVG-ultra is completely free and open-source under the MIT License. If it saved you hours before a conference deadline, a **Star ⭐** on GitHub is already the best encouragement! Voluntary tips/sponsorships are always appreciated, never required—feel free to open an Issue or PR if you want to improve it together.
+Paper2SVG-ultra is completely free and open-source under the MIT License—feel free to use it freely! If it saved you hours before a conference deadline, a **Star ⭐** on GitHub is already the best encouragement. Voluntary coffee tips are always appreciated and never required:
+
+<div align="center">
+  <img src="assets/sponsor_wechat.jpg" alt="WeChat Reward Code (Optional)" width="220" style="border-radius:10px;"/>
+  <br/>
+  <sub>WeChat Reward Code · 100% Voluntary ("Free users always welcome!")</sub>
+</div>
