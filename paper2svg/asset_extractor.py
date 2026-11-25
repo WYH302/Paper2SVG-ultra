@@ -76,39 +76,55 @@ def _load_ui_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | Ima
 
 
 def render_coordinate_ruler_overlay(draft_path: Path, out_path: Path) -> Path:
-    """Create a temporary inspection copy of stage1_draft.png with a subtle 0..1000 coordinate grid
-    so the multimodal model can read bounding boxes with ~3-5px precision.
+    """Create a 1:1 identical-dimension inspection copy of stage1_draft.png with an edge-to-edge
+    0..1000 coordinate grid (ZERO outer white margin!) so Image 1 and Image 2 share the EXACT same
+    pixel coordinate space and VLMs never double-subtract a margin offset.
     """
     with Image.open(draft_path) as base_img:
         rgb = base_img.convert("RGBA")
         w, h = rgb.size
 
-    margin = 36
-    end_pad = 24
-    canvas = Image.new("RGBA", (w + margin + end_pad, h + margin + end_pad), (255, 255, 255, 255))
-    canvas.paste(rgb, (margin, margin))
-
-    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    font = _load_ui_font(13, bold=False)
+    font = _load_ui_font(max(11, min(15, int(round(min(w, h) * 0.017)))), bold=True)
 
-    # Draw subtle dashed/translucent grid every 100 units in 0..1000 space
-    for tick in range(0, 1001, 50):
+    # Subtle outer border frame marking exact 0 and 1000 boundaries
+    draw.rectangle([0, 0, w - 1, h - 1], outline=(220, 38, 38, 170), width=2)
+
+    def _draw_tick_pill(x: int, y: int, label: str) -> None:
+        tb = draw.textbbox((0, 0), label, font=font)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        pad_x, pad_y = 3, 1
+        bx0 = max(1, min(w - tw - pad_x * 2 - 2, x))
+        by0 = max(1, min(h - th - pad_y * 2 - 2, y))
+        bx1 = bx0 + tw + pad_x * 2
+        by1 = by0 + th + pad_y * 2
+        draw.rectangle([bx0, by0, bx1, by1], fill=(255, 255, 255, 225), outline=(220, 38, 38, 185), width=1)
+        draw.text((bx0 + pad_x - tb[0], by0 + pad_y - tb[1]), label, fill=(185, 28, 28, 255), font=font)
+
+    # Draw grid every 50 units in exact edge-to-edge 0..1000 space (red major @100, blue minor @50)
+    for tick in range(50, 1000, 50):
         is_major = (tick % 100 == 0)
-        alpha = 95 if is_major else 45
+        alpha = 115 if is_major else 55
         color = (220, 38, 38, alpha) if is_major else (59, 130, 246, alpha)
 
-        gx = margin + int(round(w * tick / 1000.0))
-        gy = margin + int(round(h * tick / 1000.0))
+        gx = int(round((w - 1) * tick / 1000.0))
+        gy = int(round((h - 1) * tick / 1000.0))
 
-        draw.line([(gx, margin), (gx, margin + h)], fill=color, width=1)
-        draw.line([(margin, gy), (margin + w, gy)], fill=color, width=1)
+        draw.line([(gx, 0), (gx, h - 1)], fill=color, width=1)
+        draw.line([(0, gy), (w - 1, gy)], fill=color, width=1)
 
         if is_major:
-            draw.text((max(margin, gx - 12), 8), str(tick), fill=(185, 28, 28, 255), font=font)
-            draw.text((4, max(margin, gy - 7)), str(tick), fill=(185, 28, 28, 255), font=font)
+            lbl = str(tick)
+            tb = draw.textbbox((0, 0), lbl, font=font)
+            tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            # Place compact red ticks on ALL 4 edges for dead-accurate local coordinate reading
+            _draw_tick_pill(gx - (tw + 6) // 2, 3, lbl)
+            _draw_tick_pill(gx - (tw + 6) // 2, h - th - 7, lbl)
+            _draw_tick_pill(3, gy - (th + 4) // 2, lbl)
+            _draw_tick_pill(w - tw - 10, gy - (th + 4) // 2, lbl)
 
-    combined = Image.alpha_composite(canvas, overlay).convert("RGB")
+    combined = Image.alpha_composite(rgb, overlay).convert("RGB")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     combined.save(out_path, format="PNG")
     return out_path
@@ -183,18 +199,130 @@ def smart_remove_border_background(crop_img: Image.Image, tolerance: float = 18.
         alpha_scale = np.clip((dist_map[soft_zone] - tolerance * 0.85) / (tolerance * 0.95), 0.15, 1.0)
         out[soft_zone, 3] = np.round(out[soft_zone, 3] * alpha_scale)
 
-    cleaned = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGBA")
-
     # Trim empty transparent edges so SVG placement aligns tightly to visible artwork
     alpha = out[:, :, 3]
     ys, xs = np.where(alpha > 15)
     if len(xs) < 16 or len(ys) < 16:
         return rgba, (0, 0, 0, 0)
 
+    # Strip tiny disconnected text-bleed slivers touching the exact top/bottom raw crop edge
+    # (e.g. top 4px of a caption grazed at y2, separated from the main graphic by a blank transparent gap).
+    fg_mask = alpha > 15
+    row_counts = np.sum(fg_mask, axis=1)
+    total_fg = int(np.sum(fg_mask))
+    # Find contiguous non-empty horizontal bands
+    bands: list[tuple[int, int, int]] = []  # (r0, r1_incl, fg_pixels)
+    in_band = False
+    b_start = 0
+    for r in range(h):
+        if row_counts[r] > 0 and not in_band:
+            in_band = True
+            b_start = r
+        elif row_counts[r] == 0 and in_band:
+            in_band = False
+            bands.append((b_start, r - 1, int(np.sum(row_counts[b_start:r]))))
+    if in_band:
+        bands.append((b_start, h - 1, int(np.sum(row_counts[b_start:h]))))
+
+    if len(bands) >= 2 and total_fg > 0:
+        # Check bottom-most band touching bottom edge (h-1) and top-most band touching top edge (0)
+        main_band = max(bands, key=lambda b: b[2])
+        for b0, b1, b_fg in list(bands):
+            if (b0, b1, b_fg) == main_band:
+                continue
+            b_h = b1 - b0 + 1
+            touches_top = b0 <= 1
+            touches_bottom = b1 >= h - 2
+            if (touches_top or touches_bottom) and b_h <= max(10, int(h * 0.14)) and b_fg < main_band[2] * 0.08:
+                out[b0 : b1 + 1, :, 3] = 0.0
+        alpha = out[:, :, 3]
+        ys, xs = np.where(alpha > 15)
+        if len(xs) < 16 or len(ys) < 16:
+            return rgba, (0, 0, 0, 0)
+
     tx0, tx1 = int(xs.min()), int(xs.max()) + 1
     ty0, ty1 = int(ys.min()), int(ys.max()) + 1
+    cleaned = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGBA")
     trimmed = cleaned.crop((tx0, ty0, tx1, ty1))
     return trimmed, (tx0, ty0, w - tx1, h - ty1)
+
+
+def strip_edge_text_bleed(crop_img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """Deterministically strip tiny clipped text slivers touching the top or bottom crop edge
+    (e.g. top 4-6px of a caption grazed at y2, separated from the main graphic by >=2px of uniform
+    white/transparent backdrop). Preserves photos and multi-row graphics untouched.
+    """
+    rgba = crop_img.convert("RGBA")
+    arr = np.asarray(rgba, dtype=np.float32)
+    h, w, _ = arr.shape
+    if h < 28 or w < 24:
+        return rgba, (0, 0, 0, 0)
+
+    alpha = arr[:, :, 3]
+    rgb = arr[:, :, :3]
+    # Estimate canvas/card backdrop from the lightest 15% opaque pixels (usually white #FFFFFF or pale card)
+    opaque_rgb = rgb[alpha > 15]
+    if len(opaque_rgb) < 20:
+        return rgba, (0, 0, 0, 0)
+    bg_est = np.percentile(opaque_rgb, 92, axis=0)
+    is_ink = (alpha > 15) & (np.linalg.norm(rgb - bg_est, axis=2) > 40.0)
+
+    row_ink = np.sum(is_ink, axis=1)
+    bands: list[tuple[int, int, int]] = []  # (r0, r1_incl, ink_pixels)
+    in_band = False
+    b_start = 0
+    for r in range(h):
+        if row_ink[r] > 0 and not in_band:
+            in_band = True
+            b_start = r
+        elif row_ink[r] == 0 and in_band:
+            in_band = False
+            bands.append((b_start, r - 1, int(np.sum(row_ink[b_start:r]))))
+    if in_band:
+        bands.append((b_start, h - 1, int(np.sum(row_ink[b_start:h]))))
+
+    if len(bands) < 2:
+        return rgba, (0, 0, 0, 0)
+
+    main_band = max(bands, key=lambda b: b[2])
+    main_band_h = main_band[1] - main_band[0] + 1
+    max_sliver_h = max(8, int(round(h * 0.13)))
+    new_top = 0
+    new_bottom = h
+
+    # Check top-most sliver separated by >= 2 blank rows from next band
+    first = bands[0]
+    if first != main_band and first[0] <= 1:
+        sliver_h = first[1] - first[0] + 1
+        gap_after = bands[1][0] - first[1] - 1
+        if (
+            sliver_h <= max_sliver_h
+            and sliver_h <= main_band_h * 0.25
+            and gap_after >= 2
+            and first[2] < main_band[2] * 0.25
+        ):
+            new_top = bands[1][0]
+
+    # Check bottom-most sliver separated by >= 2 blank rows from previous band
+    last = bands[-1]
+    if last != main_band and last[1] >= h - 2:
+        sliver_h = last[1] - last[0] + 1
+        gap_before = last[0] - bands[-2][1] - 1
+        if (
+            sliver_h <= max_sliver_h
+            and sliver_h <= main_band_h * 0.25
+            and gap_before >= 2
+            and last[2] < main_band[2] * 0.25
+        ):
+            new_bottom = bands[-2][1] + 1
+
+    if new_top == 0 and new_bottom == h:
+        return rgba, (0, 0, 0, 0)
+    if new_bottom - new_top < 16:
+        return rgba, (0, 0, 0, 0)
+
+    trimmed = rgba.crop((0, new_top, w, new_bottom))
+    return trimmed, (0, new_top, 0, h - new_bottom)
 
 
 def _encode_pil_png_data_url(img: Image.Image) -> str:
@@ -203,80 +331,24 @@ def _encode_pil_png_data_url(img: Image.Image) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def detect_and_crop_visual_assets(
-    client: Any,
-    draft_path: Path,
-    output_dir: Path,
+def _crop_assets_from_specs(
+    raw_assets: list[dict[str, Any]],
+    draft_rgb: Image.Image,
+    assets_dir: Path,
     viewbox: tuple[int, int],
     *,
     max_assets: int = 8,
 ) -> list[ExtractedAsset]:
-    """Detect rich visual assets in stage1_draft.png using the multimodal model + coordinate ruler,
-    then crop them losslessly at full resolution for hybrid editable SVG assembly.
-    """
-    assets_dir = output_dir / "assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    ruler_path = output_dir / "stage1_draft_ruler.png"
-    render_coordinate_ruler_overlay(draft_path, ruler_path)
-
-    with Image.open(draft_path) as d_img:
-        draft_rgb = d_img.convert("RGB")
-        dw, dh = draft_rgb.size
-
+    """Crop and package visual assets from normalized 0..1000 bbox specifications."""
+    dw, dh = draft_rgb.size
     vb_w, vb_h = viewbox
 
-    prompt = f"""You are a Precision Visual Asset Segmenter converting a scientific overview figure into a **Hybrid Editable SVG** (like AutoFigure-Edit).
-
-Look at BOTH attached images:
-- **Image 1**: Clean `stage1_draft.png` ({dw} x {dh} px).
-- **Image 2**: The exact same figure overlaid with a **normalized 0..1000 coordinate ruler grid** (red major lines every 100 units, blue minor lines every 50 units).
-  **IMPORTANT RULER READING RULE**: Read `[x1, y1, x2, y2]` strictly from the **RED `0..1000` numbers printed in the white ruler margin** (`0` = artwork top/left edge, `1000` = artwork bottom/right edge). Do NOT include the white ruler margin in your coordinate math!
-
-YOUR JOB:
-Locate EVERY rich visual artwork region inside the figure that should be cropped losslessly from Image 1 and embedded as a draggable `<image>` inside the editable SVG — **specifically**:
-- Realistic photos or image samples (e.g., human faces, natural photos, medical scans, stone/marble slabs, satellite/scene crops)
-- 3D/isometric rendered objects (e.g., 3D meshes, voxels, optical setups, molecules, shaded geometric volumes, layered 3D tensors)
-- Tactile material textures, spatial fields, complex plots/heatmaps/spectra with dense detail
-- Expressive bespoke illustrated characters/icons (e.g., robots, researchers, microscopes, trophies, rich scientific symbols)
-
-CRITICAL EXCLUSION RULES (DO NOT CROP THESE!):
-1. **NEVER include text labels, titles, captions, or equations inside a crop bbox!** Keep every bbox TIGHT around ONLY the visual graphic itself so all text remains 100% natively editable vector `<text>`!
-2. **NEVER crop an entire module box or container frame!** Only crop the rich inner artwork/photo/3D object/illustration!
-3. **NEVER crop plain simple geometric arrows, plain empty rectangles, or simple 1-color dots** — those are cleaner as native SVG vectors!
-4. If the figure has NO complex photos/3D/rich illustrations worth cropping (purely geometric boxes/arrows), return `{{"assets": []}}`.
-
-For each asset, choose `bg_mode`:
-- `"opaque_rect"`: for rectangular framed photos, heatmaps, or full-bleed square image crops (e.g. a square portrait or rectangular marble texture photo).
-- `"remove_bg"`: for irregular/floating illustrations, 3D objects, cut-out icons, or organic stone slabs sitting on a uniform white or pale tinted card background.
-
-Return ONLY valid JSON (no markdown fences) with at most {max_assets} assets:
-{{
-  "assets": [
-    {{
-      "asset_id": "short_snake_case_id",
-      "description": "brief description of the graphic",
-      "bbox_1000": [x1, y1, x2, y2],
-      "bg_mode": "opaque_rect | remove_bg",
-      "rounded_rx": 6
-    }}
-  ]
-}}
-"""
-
-    raw = client.generate_multimodal(
-        [
-            prompt,
-            "Image 1 — Clean Stage-1 Draft:",
-            draft_path,
-            "Image 2 — 0..1000 Normalized Coordinate Ruler Overlay:",
-            ruler_path,
-        ],
-        max_output_tokens=8000,
-        temperature=0.1,
-    )
-
-    parsed = _parse_assets_json(raw)
-    raw_assets = parsed.get("assets") or []
+    # Clean stale crops before writing the latest pass
+    for old_png in assets_dir.glob("*.png"):
+        try:
+            old_png.unlink()
+        except Exception:
+            pass
 
     extracted: list[ExtractedAsset] = []
     used_ids: set[str] = set()
@@ -326,6 +398,13 @@ Return ONLY valid JSON (no markdown fences) with at most {max_assets} assets:
         else:
             final_crop = crop.convert("RGBA")
 
+        # Deterministically strip any tiny grazed caption/header text slivers separated by blank gap
+        final_crop, (btl, btt, btr, btb) = strip_edge_text_bleed(final_crop)
+        px1 += btl
+        py1 += btt
+        px2 -= btr
+        py2 -= btb
+
         if px2 <= px1 or py2 <= py1:
             continue
 
@@ -336,13 +415,19 @@ Return ONLY valid JSON (no markdown fences) with at most {max_assets} assets:
         svg_y = (py1 / float(dh)) * vb_h
         svg_w = ((px2 - px1) / float(dw)) * vb_w
         svg_h = ((py2 - py1) / float(dh)) * vb_h
+        actual_bbox_1000 = [
+            int(round(px1 * 1000.0 / float(dw))),
+            int(round(py1 * 1000.0 / float(dh))),
+            int(round(px2 * 1000.0 / float(dw))),
+            int(round(py2 * 1000.0 / float(dh))),
+        ]
 
         extracted.append(
             ExtractedAsset(
                 asset_id=slug,
                 description=str(item.get("description") or slug),
                 bg_mode=bg_mode,
-                bbox_1000=[x1_n, y1_n, x2_n, y2_n],
+                bbox_1000=actual_bbox_1000,
                 svg_x=svg_x,
                 svg_y=svg_y,
                 svg_w=svg_w,
@@ -353,6 +438,227 @@ Return ONLY valid JSON (no markdown fences) with at most {max_assets} assets:
                 data_url=_encode_pil_png_data_url(final_crop),
             )
         )
+    return extracted
+
+
+def render_verification_overlay(
+    draft_path: Path,
+    assets: list[ExtractedAsset],
+    viewbox: tuple[int, int],
+    out_path: Path,
+) -> Path:
+    """Render a see-through red-bordered verification overlay on the exact (dw, dh) canvas
+    so the VLM can inspect INSIDE and AROUND every proposed crop box for clipped headers or shifts.
+    """
+    with Image.open(draft_path) as base_img:
+        rgba = base_img.convert("RGBA")
+        dw, dh = rgba.size
+
+    overlay = Image.new("RGBA", (dw, dh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    font = _load_ui_font(13, bold=True)
+
+    vb_w, vb_h = viewbox
+    for idx, a in enumerate(assets, 1):
+        x1 = int(round((a.svg_x / float(vb_w)) * dw))
+        y1 = int(round((a.svg_y / float(vb_h)) * dh))
+        x2 = int(round(((a.svg_x + a.svg_w) / float(vb_w)) * dw))
+        y2 = int(round(((a.svg_y + a.svg_h) / float(vb_h)) * dh))
+        draw.rectangle([x1, y1, x2, y2], fill=(239, 68, 68, 45), outline=(220, 38, 38, 255), width=3)
+        # Compact badge tucked strictly INSIDE top-left corner so it NEVER hides titles above the box!
+        tag = f"#{idx}"
+        tb = draw.textbbox((0, 0), tag, font=font)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        lx = max(2, min(dw - tw - 8, x1 + 3))
+        ly = max(2, min(dh - th - 6, y1 + 3))
+        draw.rectangle([lx, ly, lx + tw + 6, ly + th + 4], fill=(220, 38, 38, 225))
+        draw.text((lx + 3 - tb[0], ly + 2 - tb[1]), tag, fill=(255, 255, 255, 255), font=font)
+
+    merged = Image.alpha_composite(rgba, overlay).convert("RGB")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    merged.save(out_path, format="PNG")
+    return out_path
+
+
+def _verify_and_calibrate_asset_boxes(
+    client: Any,
+    draft_path: Path,
+    ruler_path: Path,
+    verify_path: Path,
+    extracted: list[ExtractedAsset],
+    *,
+    max_assets: int = 8,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Perform a 1-pass visual alignment inspection on proposed crop boxes.
+
+    Catches vertical/horizontal shifts and clipped adjacent text headers BEFORE Stage 5 runs.
+    """
+    current_specs = [
+        {
+            "index": idx,
+            "asset_id": a.asset_id,
+            "description": a.description,
+            "bbox_1000": a.bbox_1000,
+            "bg_mode": a.bg_mode,
+            "rounded_rx": a.rounded_rx,
+        }
+        for idx, a in enumerate(extracted, 1)
+    ]
+
+    prompt = f"""You are performing a **Precision Crop Box Alignment Audit** before Hybrid SVG assembly.
+
+Look carefully at ALL THREE attached images (ALL THREE share the EXACT same pixel dimensions, `0..1000` edge-to-edge, ZERO outer margins!):
+- **Image 1**: Clean `stage1_draft.png`
+- **Image 2**: `stage1_draft_ruler.png` (exact edge-to-edge `0..1000` red/blue grid)
+- **Image 3**: `stage1_draft_verify.png` (the current proposed crop boxes drawn as translucent RED rectangles with compact `#1`, `#2`, ... corner badges!)
+
+CURRENT PROPOSED BOXES:
+```json
+{json.dumps(current_specs, ensure_ascii=False, indent=2)}
+```
+
+INSPECT EVERY SINGLE RED RECTANGLE IN IMAGE 3 STRICTLY:
+1. **TEXT CLIPPING CHECK (CRITICAL!)**: Does ANY red rectangle touch, graze, or cover even 2 pixels of ANY text title, card header, axis label, or caption directly above or below? If YES, tighten `y1`/`y2`/`x1`/`x2` by 5–15 units using Image 2's grid so ZERO text letters remain inside the red box!
+2. **EDGE ALIGNMENT CHECK**: Does ANY red rectangle cut off the left/right/top/bottom border of a stacked card, spectrogram, or illustration, or include excess blank margin? If YES, snap `bbox_1000` tightly around the exact artwork bounds!
+3. **DROP NON-ARTWORK**: If a red rectangle accidentally covers mostly plain text pills, plain boxes, or simple arrows that should be pure vector SVG instead of a raster crop, REMOVE that item from `assets`!
+4. If ALL red rectangles are already tight, well-centered around pure visual artwork, and clip ZERO text, set `"needs_adjustment": false` and keep them unchanged.
+
+Return ONLY valid JSON (no markdown fences):
+{{
+  "needs_adjustment": true,
+  "audit_notes": ["brief note on what was fixed or why all boxes are clean"],
+  "assets": [
+    {{
+      "asset_id": "short_snake_case_id",
+      "description": "brief description",
+      "bbox_1000": [x1, y1, x2, y2],
+      "bg_mode": "opaque_rect | remove_bg",
+      "rounded_rx": 6
+    }}
+  ]
+}}
+"""
+
+    # Cap auxiliary mask-alignment audit at 'high' when global effort is 'xhigh' to keep turnaround crisp
+    cur_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "")
+    audit_effort = "high" if str(cur_eff).strip().lower() == "xhigh" else None
+    mm_kwargs: dict[str, Any] = {"max_output_tokens": 6000, "temperature": 0.1}
+    if audit_effort:
+        mm_kwargs["reasoning_effort"] = audit_effort
+
+    raw = client.generate_multimodal(
+        [
+            prompt,
+            "Image 1 — Clean Stage-1 Draft:",
+            draft_path,
+            "Image 2 — Edge-to-Edge 0..1000 Coordinate Ruler:",
+            ruler_path,
+            "Image 3 — Current Proposed Crop Boxes (Translucent Red Outlines):",
+            verify_path,
+        ],
+        **mm_kwargs,
+    )
+    parsed = _parse_assets_json(raw)
+    if not isinstance(parsed, dict) or "needs_adjustment" not in parsed:
+        return False, current_specs
+    needs_adj = bool(parsed.get("needs_adjustment"))
+    new_assets = parsed.get("assets")
+    if not needs_adj or not isinstance(new_assets, list):
+        return False, current_specs
+    return True, new_assets[:max_assets]
+
+
+def detect_and_crop_visual_assets(
+    client: Any,
+    draft_path: Path,
+    output_dir: Path,
+    viewbox: tuple[int, int],
+    *,
+    max_assets: int = 8,
+    verify_masks: bool = True,
+) -> list[ExtractedAsset]:
+    """Detect rich visual assets in stage1_draft.png using the multimodal model + zero-margin
+    coordinate ruler, verify alignment via a translucent see-through mask overlay, and crop them
+    losslessly at full resolution for hybrid editable SVG assembly.
+    """
+    assets_dir = output_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    ruler_path = output_dir / "stage1_draft_ruler.png"
+    render_coordinate_ruler_overlay(draft_path, ruler_path)
+
+    with Image.open(draft_path) as d_img:
+        draft_rgb = d_img.convert("RGB")
+        dw, dh = draft_rgb.size
+
+    prompt = f"""You are a Precision Visual Asset Segmenter converting a scientific overview figure into a **Hybrid Editable SVG** (like AutoFigure-Edit).
+
+Look at BOTH attached images:
+- **Image 1**: Clean `stage1_draft.png` ({dw} x {dh} px).
+- **Image 2**: `stage1_draft_ruler.png` — the **EXACT SAME {dw} x {dh} px image** (ZERO outer white margin!) overlaid directly with an **edge-to-edge normalized 0..1000 coordinate grid** (red major lines every 100 units with red tick badges on all 4 edges; blue minor lines every 50 units).
+  **DIRECT 1:1 COORDINATE RULE**: `0` is the exact left/top edge of the image and `1000` is the exact right/bottom edge of the image. Read `[x1, y1, x2, y2]` directly from the red/blue grid lines — DO NOT add or subtract any margin offset!
+
+YOUR JOB:
+Locate ONLY the genuinely rich visual artwork regions inside the figure that should be cropped losslessly from Image 1 and embedded as draggable `<image>` elements inside the editable SVG — **specifically**:
+- Realistic photos or image samples (e.g., human faces, natural photos, medical scans, stone/marble slabs, satellite/scene crops, real screen reconstructions)
+- 3D/isometric rendered objects (e.g., 3D meshes, voxels, optical setups, molecules, shaded geometric volumes, layered 3D tensors)
+- Tactile material textures, spatial fields, real spectrograms/waterfalls/heatmaps/dense plots
+- Complex multi-part physical equipment illustrations or expressive bespoke icons that cannot be drawn cleanly as simple SVG primitives
+
+CRITICAL EXCLUSION RULES (DO NOT CROP THESE!):
+1. **ZERO TEXT INSIDE CROPS (STRICT!)**: NEVER include ANY title, card header, sub-label, caption, or equation inside `bbox_1000`! Always start `y1` strictly BELOW any title/header above the graphic and end `y2` strictly ABOVE any caption below the graphic so 100% of text stays crisp native vector `<text>`!
+2. **NEVER crop an entire module box, pastel panel, or text pill!** Only crop the pure graphic artwork inside.
+3. **NEVER crop simple flat geometric vectors** (plain arrows, plain rectangles, simple 3-layer circle node-link graphs, simple 1-color lines/dots) — those render sharper as native SVG vectors!
+4. If the figure is purely geometric vectors with no complex raster/photo/spectrogram/3D artwork worth cropping, return `{{"assets": []}}`.
+
+For each asset, choose `bg_mode`:
+- `"opaque_rect"`: for rectangular framed photos, spectrograms, heatmaps, or screen thumbnails.
+- `"remove_bg"`: for irregular/floating illustrations, 3D objects, or equipment icons sitting on a uniform white or pale tinted card background.
+
+Return ONLY valid JSON (no markdown fences) with at most {max_assets} assets:
+{{
+  "assets": [
+    {{
+      "asset_id": "short_snake_case_id",
+      "description": "brief description of the graphic",
+      "bbox_1000": [x1, y1, x2, y2],
+      "bg_mode": "opaque_rect | remove_bg",
+      "rounded_rx": 6
+    }}
+  ]
+}}
+"""
+
+    raw = client.generate_multimodal(
+        [
+            prompt,
+            "Image 1 — Clean Stage-1 Draft:",
+            draft_path,
+            "Image 2 — Edge-to-Edge 0..1000 Coordinate Ruler Overlay (Identical Dimensions, Zero Margin):",
+            ruler_path,
+        ],
+        max_output_tokens=8000,
+        temperature=0.1,
+    )
+
+    parsed = _parse_assets_json(raw)
+    raw_assets = parsed.get("assets") or []
+
+    extracted = _crop_assets_from_specs(
+        raw_assets, draft_rgb, assets_dir, viewbox, max_assets=max_assets
+    )
+
+    if extracted and verify_masks:
+        verify_path = output_dir / "stage1_draft_verify.png"
+        render_verification_overlay(draft_path, extracted, viewbox, verify_path)
+        adjusted, refined_specs = _verify_and_calibrate_asset_boxes(
+            client, draft_path, ruler_path, verify_path, extracted, max_assets=max_assets
+        )
+        if adjusted:
+            extracted = _crop_assets_from_specs(
+                refined_specs, draft_rgb, assets_dir, viewbox, max_assets=max_assets
+            )
+            if extracted:
+                render_verification_overlay(draft_path, extracted, viewbox, output_dir / "stage1_draft_verify_calibrated.png")
 
     # Save manifest (without giant base64 strings) for inspection & resume
     manifest_data = [
@@ -384,17 +690,22 @@ def render_masked_draft_preview(
     font = _load_ui_font(16, bold=True)
 
     vb_w, vb_h = viewbox
-    for a in assets:
+    for idx, a in enumerate(assets, 1):
         x1 = int(round((a.svg_x / float(vb_w)) * dw))
         y1 = int(round((a.svg_y / float(vb_h)) * dh))
         x2 = int(round(((a.svg_x + a.svg_w) / float(vb_w)) * dw))
         y2 = int(round(((a.svg_y + a.svg_h) / float(vb_h)) * dh))
         draw.rectangle([x1, y1, x2, y2], fill=(128, 128, 128, 215), outline=(15, 23, 42, 255), width=2)
+        box_w = max(1, x2 - x1)
         tag = f"ASSET:{a.asset_id}"
-        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         bbox = draw.textbbox((0, 0), tag, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text((max(x1 + 2, cx - tw // 2), max(y1 + 2, cy - th // 2)), tag, fill=(255, 255, 255, 255), font=font)
+        if tw > box_w - 8:
+            tag = f"#{idx}"
+            bbox = draw.textbbox((0, 0), tag, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        draw.text((max(x1 + 3, cx - tw // 2), max(y1 + 2, cy - th // 2)), tag, fill=(255, 255, 255, 255), font=font)
 
     merged = Image.alpha_composite(rgba, overlay).convert("RGB")
     out_path.parent.mkdir(parents=True, exist_ok=True)

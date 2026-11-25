@@ -57,8 +57,14 @@ class ResponsesAPIClient:
         if not settings.api_key:
             raise ValueError("OPENAI_API_KEY is missing. Please set it in .env or environment variables.")
 
-    def _apply_reasoning(self, payload: dict[str, Any], *, temperature: Optional[float] = None) -> dict[str, Any]:
-        effort = (self.settings.reasoning_effort or "").strip().lower()
+    def _apply_reasoning(
+        self,
+        payload: dict[str, Any],
+        *,
+        temperature: Optional[float] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> dict[str, Any]:
+        effort = (reasoning_effort if reasoning_effort is not None else (self.settings.reasoning_effort or "")).strip().lower()
         if effort and effort != "none":
             payload["reasoning"] = {"effort": effort}
             # OpenAI reasoning models generally disallow explicit temperature when reasoning effort is active
@@ -107,7 +113,8 @@ class ResponsesAPIClient:
                                 continue
 
                             if resp.status_code in RETRYABLE_STATUS_CODES and attempt < self.settings.max_retries:
-                                time.sleep(min(5.0 * attempt, 20.0))
+                                delay = min(8.0 * attempt, 30.0) if resp.status_code == 503 else min(5.0 * attempt, 20.0)
+                                time.sleep(delay)
                                 continue
                             raise RuntimeError(f"Responses API HTTP {resp.status_code}: {body[:800]}")
 
@@ -195,6 +202,7 @@ class ResponsesAPIClient:
         model: Optional[str] = None,
         max_output_tokens: int = 20000,
         temperature: float = 0.25,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """Run a text-only request via /v1/responses (SSE streaming + reasoning effort)."""
         payload: dict[str, Any] = {
@@ -205,7 +213,7 @@ class ResponsesAPIClient:
         }
         if system:
             payload["instructions"] = system
-        self._apply_reasoning(payload, temperature=temperature)
+        self._apply_reasoning(payload, temperature=temperature, reasoning_effort=reasoning_effort)
 
         data = self._post_responses(payload)
         text = self._extract_output_text(data)
@@ -221,6 +229,7 @@ class ResponsesAPIClient:
         model: Optional[str] = None,
         max_output_tokens: int = 36000,
         temperature: float = 0.2,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
         """Run a multimodal (text + N images) request via /v1/responses (SSE streaming + reasoning effort)."""
         content_blocks: list[dict[str, Any]] = []
@@ -240,7 +249,7 @@ class ResponsesAPIClient:
         }
         if system:
             payload["instructions"] = system
-        self._apply_reasoning(payload, temperature=temperature)
+        self._apply_reasoning(payload, temperature=temperature, reasoning_effort=reasoning_effort)
 
         data = self._post_responses(payload)
         text = self._extract_output_text(data)

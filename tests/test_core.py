@@ -1,7 +1,8 @@
-"""Automated unit & integration tests for Paper2SVG-Pro (including Hybrid SVG asset engine & xhigh reasoning)."""
+"""Automated unit & integration tests for Paper2SVG-ultra (v1.1.0: zero-margin ruler, adaptive density, OOB linter, Critic retention, & primary style winner)."""
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pymupdf
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import run as cli_run
 from paper2svg.archetypes import ARCHETYPES, get_archetype
 from paper2svg.architect import extract_exact_text_inventory, extract_prompt_body
 from paper2svg.asset_extractor import (
@@ -19,12 +21,15 @@ from paper2svg.asset_extractor import (
     inject_missing_assets,
     render_coordinate_ruler_overlay,
     smart_remove_border_background,
+    strip_edge_text_bleed,
     verify_assets_preserved,
     _encode_pil_png_data_url,
 )
 from paper2svg.client import ResponsesAPIClient
-from paper2svg.config import Settings, load_settings, sanitize_font_family
+from paper2svg.config import Settings, load_settings, resolve_density_mode, sanitize_font_family
 from paper2svg.pdf_parser import extract_pdf_sections
+from paper2svg.style_extractor import discover_reference_images, extract_style_dna
+from paper2svg.svg_critic import check_critic_content_retention
 from paper2svg.svg_linter import lint_svg
 from paper2svg.svg_renderer import render_dual_preview
 from server import app
@@ -132,11 +137,13 @@ def test_hybrid_asset_crop_bg_removal_and_svg_render() -> None:
         cy, cx = c_arr.shape[0] // 2, c_arr.shape[1] // 2
         assert c_arr[cy, cx, 3] == 255
 
-        # Test ruler overlay
+        # Test zero-margin 1:1 coordinate ruler overlay (exact identical dimensions!)
         draft_path = td_path / "draft.png"
         crop_src.save(draft_path)
         ruler_path = render_coordinate_ruler_overlay(draft_path, td_path / "ruler.png")
         assert ruler_path.is_file()
+        with Image.open(ruler_path) as ruler_im:
+            assert ruler_im.size == crop_src.size, f"Expected 1:1 ruler size {crop_src.size}, got {ruler_im.size}"
 
         # Test hydration / dehydration / verification / resvg-py rendering of base64 embedded <image>
         data_url = _encode_pil_png_data_url(cleaned)
@@ -211,6 +218,147 @@ def test_svg_linter_catches_bad_and_passes_good() -> None:
     assert "font-size=12px" in joined
 
 
+def test_strip_edge_text_bleed_preserves_graphic_and_removes_caption_sliver() -> None:
+    # Build a 100x80 white image with a main card box (rows 5..64) + 4px white gap + 5px grazed text sliver at bottom (rows 75..79)
+    arr = np.full((80, 100, 3), 255, dtype=np.uint8)
+    arr[5:65, 10:90] = [30, 30, 30]   # main graphic
+    arr[12:58, 16:84] = [245, 245, 245]
+    arr[75:80, 20:70] = [20, 20, 20]  # grazed caption sliver touching bottom edge
+    img_with_bleed = Image.fromarray(arr, mode="RGB")
+
+    cleaned, trims = strip_edge_text_bleed(img_with_bleed)
+    assert trims[3] >= 10, f"Expected bottom sliver trimmed, got trims={trims}"
+    assert cleaned.height <= 66
+
+    # Verify a clean 3-row stacked waveform graphic is NOT altered
+    wf = np.full((120, 100, 3), 255, dtype=np.uint8)
+    wf[10:35, 10:90] = [90, 70, 180]
+    wf[45:70, 10:90] = [50, 110, 200]
+    wf[80:105, 10:90] = [210, 130, 40]
+    wf_img = Image.fromarray(wf, mode="RGB")
+    wf_out, wf_trims = strip_edge_text_bleed(wf_img)
+    assert wf_trims == (0, 0, 0, 0) and wf_out.size == wf_img.size
+
+
+def test_adaptive_density_oob_and_critic_retention_guard() -> None:
+    assert resolve_density_mode("auto", 20) == "concise"
+    assert resolve_density_mode("auto", 54) == "detailed"
+    assert resolve_density_mode("concise", 54) == "concise"
+    assert resolve_density_mode("detailed", 10) == "detailed"
+
+    # 1. Dense 42-label systems SVG should pass in `auto` (resolving to `detailed`) with 14px labels and 0 false overcrowding errors
+    inventory = [f"Module {i:02d}" for i in range(1, 43)]
+    text_nodes = []
+    for idx, lbl in enumerate(inventory):
+        col, row = idx % 6, idx // 6
+        x = 120 + col * 240
+        y = 70 + row * 75
+        text_nodes.append(
+            f'<rect x="{x - 95}" y="{y - 18}" width="190" height="36" rx="6" fill="#DEE5F1" stroke="#171717"/>'
+            f'<text x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central" '
+            f'font-family="Inter, Arial, sans-serif" font-size="14">{lbl}</text>'
+        )
+    dense_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">'
+        '<rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>'
+        + "".join(text_nodes)
+        + "</svg>"
+    )
+    rep_dense = lint_svg(dense_svg, exact_text_inventory=inventory, expected_viewbox=(1600, 610), density="auto")
+    assert rep_dense.stats["density_mode"] == "detailed"
+    assert rep_dense.passed_hard_checks, f"Unexpected errors on valid dense SVG: {rep_dense.errors}"
+    assert rep_dense.stats["inventory_coverage_ratio"] == 1.0
+
+    # 2. Canvas clipping & textLength squashing checks (while ignoring <defs>/<clipPath> and matching multi-line stacked <text>)
+    clipped_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">
+      <defs><clipPath id="cp"><rect x="0" y="0" width="2000" height="800"/></clipPath></defs>
+      <rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>
+      <text x="120" y="60" font-family="Inter, Arial, sans-serif" font-size="16">Hybrid Plan</text>
+      <text x="120" y="80" font-family="Inter, Arial, sans-serif" font-size="16">Generation</text>
+      <text x="300" y="80" font-family="Inter, Arial, sans-serif" font-size="16" textLength="60" lengthAdjust="spacingAndGlyphs">Squashed Label</text>
+      <rect id="overflow_card" x="1520" y="420" width="130" height="120" rx="8" fill="#F7E5D8" stroke="#171717"/>
+      <text x="1585" y="575" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18">Verified Output</text>
+    </svg>"""
+    rep_oob = lint_svg(
+        clipped_svg,
+        exact_text_inventory=["Hybrid Plan Generation", "Verified Output"],
+        expected_viewbox=(1600, 610),
+        density="detailed",
+    )
+    assert not rep_oob.passed_hard_checks
+    assert rep_oob.stats["out_of_bounds_count"] >= 2
+    assert rep_oob.stats["inventory_coverage_ratio"] == 1.0  # consecutive stacked <text> matched "Hybrid Plan Generation"!
+    assert any("Canvas clipping" in e for e in rep_oob.errors)
+    assert any("textLength" in e for e in rep_oob.errors)
+
+    # 3. Critic semantic retention guard: grouping 42 labels into 14 multi-line <tspan> elements MUST BE ACCEPTED
+    grouped_nodes = []
+    for g_idx in range(0, len(inventory), 3):
+        grp = inventory[g_idx : g_idx + 3]
+        col, row = (g_idx // 3) % 5, (g_idx // 3) // 5
+        x, y = 160 + col * 280, 90 + row * 160
+        tspans = "".join(f'<tspan x="{x}" dy="{0 if j == 0 else 18}">{lbl}</tspan>' for j, lbl in enumerate(grp))
+        grouped_nodes.append(
+            f'<text x="{x}" y="{y}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="14">{tspans}</text>'
+        )
+    grouped_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">'
+        '<rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>'
+        + "".join(grouped_nodes)
+        + "</svg>"
+    )
+    rep_grouped = lint_svg(grouped_svg, exact_text_inventory=inventory, expected_viewbox=(1600, 610), density="detailed")
+    assert rep_grouped.stats["text_elements"] == 14  # < 50% of 42 <text> nodes!
+    ok_keep, msg_keep = check_critic_content_retention(rep_dense, rep_grouped, inventory)
+    assert ok_keep, f"Expected <tspan> consolidation to be accepted, got rejection: {msg_keep}"
+
+    # 4. Destructive label deletion (dropping 75% of inventory) MUST BE REJECTED
+    pruned_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">'
+        '<rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>'
+        + "".join(text_nodes[:8])
+        + "</svg>"
+    )
+    rep_pruned = lint_svg(pruned_svg, exact_text_inventory=inventory, expected_viewbox=(1600, 610), density="detailed")
+    ok_prune, msg_prune = check_critic_content_retention(rep_dense, rep_pruned, inventory)
+    assert not ok_prune and "dropped" in msg_prune.lower()
+
+
+def test_primary_ref_and_single_style_winner_and_cli_flags() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        img1 = td_path / "big_ref.png"
+        img2 = td_path / "pinned_ref.png"
+        Image.new("RGB", (1200, 600), (240, 240, 240)).save(img1)
+        Image.new("RGB", (600, 300), (220, 230, 250)).save(img2)
+
+        # Pinning primary_ref strictly selects ONLY that single image
+        picked = discover_reference_images(td_path, primary_ref=img2)
+        assert picked == [img2]
+
+        # Multi-image extract_style_dna pins strictly to a SINGLE Primary Style Winner (length 1)
+        class _DummyClient:
+            def generate_multimodal(self, contents, **kwargs):
+                return json.dumps(
+                    {
+                        "visual_paradigm": "soft_card_editorial",
+                        "primary_anchor_reason": "Cleanest flat 2D layout without clutter.",
+                        "top_anchor_indices": [2, 1],
+                    }
+                )
+
+        dna = extract_style_dna(_DummyClient(), [img1, img2], target_archetype="framework")
+        assert dna["top_anchor_indices"] == [2]
+        assert dna["anchor_files"] == [str(img2)]
+        assert "Cleanest" in dna.get("primary_anchor_reason", "")
+
+    # CLI flags check
+    parser = cli_run.build_parser()
+    parsed = parser.parse_args(["--paper", "a.pdf", "--density", "detailed", "--primary-ref", "ref.png"])
+    assert parsed.density == "detailed"
+    assert parsed.primary_ref == Path("ref.png")
+
+
 def test_fastapi_endpoints_and_svgedit() -> None:
     client = TestClient(app)
     r_home = client.get("/")
@@ -220,6 +368,7 @@ def test_fastapi_endpoints_and_svgedit() -> None:
     cfg = r_cfg.json()
     assert cfg["main_model"]
     assert cfg["svg_mode"] in ("hybrid_rich", "pure_vector")
+    assert cfg["density"] in ("auto", "concise", "detailed")
     assert cfg["svg_edit_url"] == "/svg-edit/editor/index.html"
     r_edit = client.get("/svg-edit/editor/index.html")
     assert r_edit.status_code == 200
@@ -235,5 +384,8 @@ if __name__ == "__main__":
     test_schema_parsing()
     test_hybrid_asset_crop_bg_removal_and_svg_render()
     test_svg_linter_catches_bad_and_passes_good()
+    test_strip_edge_text_bleed_preserves_graphic_and_removes_caption_sliver()
+    test_adaptive_density_oob_and_critic_retention_guard()
+    test_primary_ref_and_single_style_winner_and_cli_flags()
     test_fastapi_endpoints_and_svgedit()
-    print("ALL UPGRADED HYBRID + XHIGH AUTOMATED TESTS PASSED!")
+    print("ALL v1.1.0 AUTOMATED TESTS PASSED!")

@@ -9,7 +9,8 @@ import numpy as np
 from PIL import Image
 
 from .archetypes import ArchetypeSpec
-from .architect import extract_prompt_body
+from .architect import extract_exact_text_inventory, extract_prompt_body
+from .config import resolve_density_mode
 
 
 def smart_trim_white_margins(
@@ -79,43 +80,56 @@ def generate_stage1_draft(
     style_dna: dict[str, Any],
     archetype: ArchetypeSpec,
     output_dir: Path,
+    *,
+    density: str = "auto",
 ) -> tuple[Path, tuple[int, int], dict[str, Any]]:
     """Generate a publication-grade visual anchor faithfully honoring the reference folder's artistry."""
     prompt_body = extract_prompt_body(schema_md)
+    inventory = extract_exact_text_inventory(schema_md)
+    resolved_density = resolve_density_mode(density, len(inventory))
     anchor_paths = [Path(p) for p in style_dna.get("anchor_files", []) if Path(p).is_file()]
 
     aspect_directive = (
-        "CANVAS PROPORTION: Create a sleek **WIDE PANORAMIC (~2.25:1 / 21:9) HORIZONTAL BANNER** "
-        "designed for the top of a two-column CVPR / SIGGRAPH / NeurIPS / Nature paper, on a clean pure `#FFFFFF` background with generous white margins."
+        "CANVAS PROPORTION: Create a sleek **WIDE PANORAMIC (~2.35:1–2.55:1) HORIZONTAL BANNER** "
+        "designed for the top of a two-column CVPR / SIGGRAPH / NeurIPS / IEEE S&P / Nature paper, on a clean pure `#FFFFFF` background with balanced white margins."
         if archetype.is_wide_banner
         else "CANVAS PROPORTION: Create a balanced ~1.6:1 worked-example scientific teaser diagram on a pure `#FFFFFF` background with generous margins."
     )
 
     ref_clause = (
         "ART-DIRECTION REFERENCE IMAGE(S) ATTACHED — FOLLOW THEIR VISUAL CRAFT CLOSELY!\n"
-        "- Study and match their EXACT visual sophistication: rendering richness (3D shaded objects, photorealistic specimens, tactile textures, bespoke scientific icons, or crisp mini-plots), "
-        "their border/borderless container philosophy, their arrow craft (e.g., wide colored arrows, soft ribbons, or clean connectors), color harmony, and generous whitespace.\n"
-        "- DO NOT degrade their rich visual aesthetic into a generic wireframe box-and-arrow flowchart!\n"
+        "- Study and match their EXACT visual sophistication: rendering richness (3D shaded objects, photorealistic specimens, flat 2D editorial panels, tactile textures, bespoke scientific icons, or crisp mini-plots), "
+        "their border/borderless container philosophy, their arrow craft (e.g., wide colored arrows, chunky white-filled block arrows, soft ribbons, or clean connectors), color harmony, and whitespace rhythm.\n"
+        "- DO NOT invent conflicting visual styles (e.g., NEVER add 3D plastic shading or drop shadows if the reference is crisp flat 2D editorial, and NEVER degrade a rich 3D reference into a dry wireframe flowchart)!\n"
         "- STRICT CONTENT ISOLATION ('借骨架与画风，不借画中内容'): NEVER copy ANY text, model names, titles, or unrelated modules from the reference images!"
         if anchor_paths
         else "Create a vibrant, visually captivating flagship NeurIPS / CVPR / Nature scientific illustration (NOT a dry plain Visio box-and-arrow flowchart!)."
     )
 
-    render_prompt = f"""Design a **flagship, award-winning top-conference scientific overview illustration** (SIGGRAPH / CVPR / NeurIPS / Nature cover-worthy visual craft).
+    if resolved_density == "detailed":
+        density_mandate = """1. **CRISP MULTI-PANEL SYSTEMS ARCHITECTURE CLARITY (`detailed` tier)**:
+   - Follow the exact multi-panel grid and white gutter spacing specified in the Visual Schema, keeping all panels cleanly aligned, well-proportioned, and visually uncluttered.
+   - **STRICTLY FORBIDDEN**: DO NOT invent extra numbers, extra labels, or reference-image words not listed in `[EXACT TEXT INVENTORY]`!
+2. **SHARP DOMAIN MICRO-VISUALS (MATCHING REFERENCE CRAFT)**:
+   - Render every micro-visual in `[HERO VISUAL ASSETS]` crisp, domain-authentic, and well-separated from text titles and arrows."""
+    else:
+        density_mandate = """1. **AIRY EDITORIAL MINIMALISM (35%–45% PURE WHITE WHITESPACE!)**:
+   - Keep the canvas remarkably **spacious, uncluttered, and breathable** — like a Nature / CVPR Oral flagship Figure 1!
+   - Wide outer white margins, wide open gaps between stages, and generous spacing around every graphic and text label.
+   - **STRICTLY FORBIDDEN**: DO NOT invent or add extra tiny numbers, extra hyperparameters, extra axis ticks, extra mini-charts, or extra labels that are NOT listed in `[EXACT TEXT INVENTORY]`!
+2. **BIG, CRISP VISUAL HEROES (3–6 HERO GRAPHICS, NOT 16 POSTAGE STAMPS)**:
+   - Make the 3–6 hero domain visuals in `[HERO VISUAL ASSETS]` LARGE, SHARP, and PROMINENT with clean open space around them. Let visuals breathe instead of trapping every sub-element inside nested boxes!"""
+
+    render_prompt = f"""Design a **flagship, award-winning top-conference scientific overview illustration** (SIGGRAPH / CVPR / NeurIPS / IEEE S&P / Nature publication craft).
 
 {aspect_directive}
 
 {ref_clause}
 
-KEY VISUAL EXCELLENCE & ANTI-CROWDING MANDATES:
-1. **AIRY EDITORIAL MINIMALISM (35%–45% PURE WHITE WHITESPACE!)**:
-   - Keep the canvas remarkably **spacious, uncluttered, and breathable** — like a Nature / CVPR Oral flagship Figure 1!
-   - Wide outer white margins, wide open gaps between stages, and generous spacing around every graphic and text label.
-   - **STRICTLY FORBIDDEN**: DO NOT invent or add extra tiny numbers, extra hyperparameters, extra axis ticks, extra mini-charts, or extra labels that are NOT listed in `[EXACT TEXT INVENTORY]`!
-2. **BIG, CRISP VISUAL HEROES (3–6 HERO GRAPHICS, NOT 16 POSTAGE STAMPS)**:
-   - Make the 3–6 hero domain visuals in `[HERO VISUAL ASSETS]` LARGE, SHARP, and PROMINENT with clean open space around them. Let visuals breathe instead of trapping every sub-element inside nested boxes!
-3. **TRUE REFERENCE AESTHETIC**: Follow the container style (`{style_dna.get('container_philosophy', {}).get('style', '')}`), arrow craft (`{style_dna.get('arrow_craft', {}).get('style', '')}`), and color palette distilled from the references. Avoid clutter and avoid Visio-style thin-black-box boilerplate.
-4. **LARGE, EFFORTLESS ACADEMIC TYPOGRAPHY**: Clean unified sans-serif (Inter / Helvetica / Arial), bold and large enough to read effortlessly when shrunk to 7-inch two-column print width. Keep text cleanly separated from illustrations and arrows.
+KEY VISUAL EXCELLENCE & FIDELITY MANDATES:
+{density_mandate}
+3. **TRUE REFERENCE AESTHETIC**: Follow the container style (`{style_dna.get('container_philosophy', {}).get('style', '')}`), arrow craft (`{style_dna.get('arrow_craft', {}).get('style', '')}`), and color palette distilled from the reference.
+4. **CRISP ACADEMIC TYPOGRAPHY**: Clean unified sans-serif (Inter / Helvetica / Arial), crisp and legible when shrunk to 7-inch two-column print width. Keep text cleanly separated from illustrations and arrows.
 5. **ZERO META-LABEL LEAKAGE**: Render ONLY the concise labels in `[EXACT TEXT INVENTORY]`. NEVER write structural tags like "SECTION 1", "HERO VISUAL ASSETS", "BASELINE", "NOVEL", or "Container".
 
 === VISUAL SCHEMA TO RENDER ===

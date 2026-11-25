@@ -1,6 +1,6 @@
 [project]
 name = "paper2svg-ultra"
-version = "1.0.0"
+version = "1.1.0"
 description = "Reference-driven top-venue academic paper overview diagram generator (PDF + Reference Folder -> Editable Hybrid SVG)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -29,3 +29,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["paper2svg"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

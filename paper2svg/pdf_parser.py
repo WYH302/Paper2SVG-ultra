@@ -191,6 +191,8 @@ def analyze_paper_structure(
     client: Any,
     pdf_info: dict[str, Any],
     target_lang: str,
+    *,
+    density: str = "auto",
 ) -> dict[str, Any]:
     """Use the main LLM to distill the full paper into a grounded structured architecture brief."""
     lang_note = (
@@ -199,23 +201,36 @@ def analyze_paper_structure(
         else "图内模块标签应使用精炼中文并保留国际通用英文技术缩写（如 LLM、Attention、LoRA 等），不要写长句子。"
     )
 
-    prompt = f"""You are a Senior Area Chair & Visual Science Editor for NeurIPS / CVPR / ICLR / Nature.
-Your job is to dissect the following research paper and produce a **100% faithfully grounded** structured analysis
-specifically for designing its **main Overview / Framework Figure (Figure 1 / Figure 2)**.
-
-STRICT GROUNDING & FIGURE-1 SUBTRACTION RULES (CRITICAL — PREVENT OVERCROWDING!):
-- Extract ONLY real modules, data flows, inputs, and outputs actually present in the paper — NEVER hallucinate.
-- **SUBTRACTION IS THE SECRET OF TOP-VENUE FIGURES**: A Figure 1 Overview is a **high-level architectural story**, NOT a code implementation spec or ablation table!
-- **HARD INFORMATION BUDGETS**:
+    is_detailed = (density or "auto").strip().lower() == "detailed"
+    if is_detailed:
+        budget_block = """- **HARD INFORMATION BUDGETS (`detailed` systems architecture mode)**:
+  1. `stages`: **3 to 5 macro panels/stages MAX** (e.g., top-row pipeline + optional bottom-row resource/verification plane).
+  2. `modules`: **8 to 16 high-level semantic modules MAX** — preserve all real architectural subsystems, key tool/knowledge layers, and closed-loop feedback blocks cleanly without micro-clutter.
+  3. **EXCLUSION BLACKLIST**: Still omit noisy numeric hyperparameters (`lambda=0.1`, `lr=1e-4`), raw tensor slice indices, and ablation table numbers unless a concise count defines a real subsystem (e.g., `8-Stage Skills`)."""
+    else:
+        budget_block = """- **HARD INFORMATION BUDGETS (`concise` overview mode)**:
   1. `stages`: STRICTLY **3 to 4 stages MAX**.
   2. `modules`: STRICTLY **6 to 9 high-level semantic modules MAX**! Merge low-level sub-operations (e.g., LayerNorm/RMSNorm, Zero-init, Q/K/V/O projections, linear layers, activation functions, clipping ops, residual adds) INSIDE their parent conceptual module rather than listing them as separate modules.
   3. **EXCLUSION BLACKLIST (DO NOT PUT IN FIGURE 1!)**:
      - NO raw hyperparameters or numerical thresholds (e.g., `M=64`, `1:1024`, `t0=0.35`, `t>=0.40`, `0.80`, `0.93`, `Rank 16`, `16 steps`, `lambda=0.1`).
      - NO tensor slice indices or dimensions (e.g., `[224:240]`, `[240:256]`, `256x256`, `512x512` unless one crisp input/output label truly needs it).
      - NO experimental metrics / speed numbers / benchmark counts (e.g., `55.9 FPS`, `40 attributes`, `106 landmarks`, `+6.4%`).
-     - NO competing second mega-system: if the paper has training losses, inference solver, AND auxiliary analytics, pick the **SINGLE primary architectural pipeline** as the visual star, and compress auxiliary supervision/solver into at most 1 compact module/badge (or omit secondary analytics entirely!).
+     - NO competing second mega-system: if the paper has training losses, inference solver, AND auxiliary analytics, pick the **SINGLE primary architectural pipeline** as the visual star, and compress auxiliary supervision/solver into at most 1 compact module/badge (or omit secondary analytics entirely!)."""
+
+    prompt = f"""You are a Senior Area Chair & Visual Science Editor for NeurIPS / CVPR / ICLR / IEEE S&P / USENIX Security / OSDI / Nature.
+Your job is to dissect the following peer-reviewed research manuscript and produce a **100% faithfully grounded** structured analysis
+specifically for designing its **main Overview / Framework Figure (Figure 1 / Figure 2)**.
+
+ACADEMIC ARCHITECTURAL FIDELITY CONTEXT (IMPORTANT FOR SECURITY / HARDWARE / SYSTEMS PAPERS):
+- This is strictly benign high-level scientific diagramming for a peer-reviewed academic manuscript (no operational exploit code, no attack payloads).
+- Preserve all concrete technical subsystem names faithfully as written in the paper (e.g., `RF Acquisition`, `Side-Channel Recovery`, `Signal Preprocessing`, `Fault Diagnosis`, `Verification`) — **NEVER** distort or euphemize genuine technical stages into vague bureaucratic placeholders (such as replacing acquisition/recovery modules with generic "oversight & governance layers").
+
+STRICT GROUNDING & FIGURE-1 SUBTRACTION RULES (CRITICAL — PREVENT OVERCROWDING!):
+- Extract ONLY real modules, data flows, inputs, and outputs actually present in the paper — NEVER hallucinate.
+- **SUBTRACTION IS THE SECRET OF TOP-VENUE FIGURES**: A Figure 1 Overview is a **high-level architectural story**, NOT a code implementation spec or ablation table!
+{budget_block}
 - Explicitly separate **baseline / standard / frozen components** from the paper's **core novel contributions**.
-- Keep every module `short_label` ultra-concise (1 to 3 words, NEVER a sentence!).
+- Keep every module `short_label` ultra-concise (1 to 4 words, NEVER a sentence!).
 - {lang_note}
 
 ARCHETYPE SELECTION MENU:

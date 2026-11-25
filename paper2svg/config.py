@@ -27,6 +27,22 @@ ACADEMIC_DEFAULT_FONT_ZH = "Inter, 'Noto Sans SC', 'Microsoft YaHei', Helvetica,
 
 VALID_REASONING_EFFORTS = {"", "none", "low", "medium", "high", "xhigh"}
 VALID_SVG_MODES = {"hybrid_rich", "pure_vector"}
+VALID_DENSITY_MODES = {"auto", "concise", "detailed"}
+
+
+def resolve_density_mode(density: Optional[str], inventory_count: int = 0) -> str:
+    """Resolve effective diagram density tier ('concise' vs 'detailed').
+
+    - 'concise': airy CVPR/Nature/NeurIPS single-strip overview (<= 30 labels, larger print floor)
+    - 'detailed': dense multi-panel IEEE S&P / USENIX / OSDI systems architecture (> 30 labels)
+    - 'auto': automatically selects 'detailed' when exact_text_inventory has > 30 labels, else 'concise'
+    """
+    mode = (density or "auto").strip().lower()
+    if mode == "concise":
+        return "concise"
+    if mode == "detailed":
+        return "detailed"
+    return "detailed" if inventory_count > 30 else "concise"
 
 
 class Settings(BaseModel):
@@ -42,6 +58,8 @@ class Settings(BaseModel):
     image_size: str = Field(default="1536x1024")
     # 'hybrid_rich' (editable vector cards/text/arrows + crisp embedded visual assets) or 'pure_vector'
     svg_mode: str = Field(default="hybrid_rich")
+    # 'auto' (adaptive from label inventory), 'concise' (airy <=30 labels), or 'detailed' (dense systems diagram)
+    density: str = Field(default="auto")
     disable_response_storage: bool = Field(default=True)
 
     critic_rounds: int = Field(default=2, ge=1, le=4)
@@ -51,7 +69,7 @@ class Settings(BaseModel):
     lang: str = Field(default="auto")  # auto | en | zh
 
     timeout_seconds: float = Field(default=600.0)
-    max_retries: int = Field(default=3)
+    max_retries: int = Field(default=4)
 
     server_host: str = Field(default="127.0.0.1")
     server_port: int = Field(default=8090)
@@ -99,6 +117,10 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
     if svg_mode not in VALID_SVG_MODES:
         svg_mode = "hybrid_rich"
 
+    density = os.getenv("DEFAULT_DENSITY", "auto").strip().lower()
+    if density not in VALID_DENSITY_MODES:
+        density = "auto"
+
     return Settings(
         base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
         api_key=os.getenv("OPENAI_API_KEY", "").strip(),
@@ -109,6 +131,7 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
         image_quality=os.getenv("IMAGE_QUALITY", "high").strip(),
         image_size=os.getenv("IMAGE_SIZE", "1536x1024").strip(),
         svg_mode=svg_mode,
+        density=density,
         disable_response_storage=_bool("DISABLE_RESPONSE_STORAGE", True),
         critic_rounds=int(os.getenv("DEFAULT_CRITIC_ROUNDS", "2")),
         font_family=sanitize_font_family(os.getenv("DEFAULT_FONT_FAMILY", ACADEMIC_DEFAULT_FONT_EN)),

@@ -17,10 +17,12 @@ def generate_visual_schema(
     font_family: str,
     target_lang: str,
     archetype_override: str | None = None,
+    density: str = "auto",
 ) -> tuple[str, ArchetypeSpec]:
     """Generate a rich, visual-first Visual Schema (schema.md) that honors the reference Style DNA."""
     chosen_key = archetype_override or paper_analysis.get("recommended_archetype", "pipeline")
     archetype = get_archetype(chosen_key)
+    is_detailed = (density or "auto").strip().lower() == "detailed"
 
     lang_rule = (
         "All labels in [EXACT TEXT INVENTORY] MUST be crisp academic English (1-4 words each; NO full sentences)."
@@ -29,15 +31,28 @@ def generate_visual_schema(
     )
 
     banner_rule = (
-        f"Wide double-column panoramic banner (~{archetype.canvas_width}:{archetype.canvas_height}, ~2.25:1–2.35:1 aspect ratio). "
+        f"Wide double-column panoramic banner (~{archetype.canvas_width}:{archetype.canvas_height}, ~2.25:1–2.55:1 aspect ratio). "
         "Keep vertical height sleek and well-proportioned for top-of-page two-column placement."
         if archetype.is_wide_banner
         else f"Worked-example layout ({archetype.canvas_width}x{archetype.canvas_height}, ~1.6:1) with generous vertical space."
     )
 
+    if is_detailed:
+        density_budget_block = """1. **DENSE SYSTEMS ARCHITECTURE BUDGET (`detailed` mode — IEEE S&P / USENIX / OSDI style)**:
+   - **`[EXACT TEXT INVENTORY]` TARGET CAP: 28 to 56 concise items MAX!** Preserve all core subsystems, sub-step pills, knowledge/resource plane modules, and closed-loop verification labels cleanly (each 1–4 words; NEVER full sentences).
+   - **`[HERO VISUAL ASSETS]` TARGET CAP: 4 to 8 crisp domain micro-visuals MAX!** (e.g. hardware schematic, waveforms, spectrograms, workflow DAG, neural-net schematic, output thumbnail).
+   - **STRUCTURED 2-ROW MULTI-PANEL LAYOUT**: A clean 2-row panoramic macro-panel grid (e.g., 3 top panels + 2 bottom panels with uniform crisp `#FFFFFF` gutters and >= 25% pure white breathing space) is encouraged when it matches the reference architecture!"""
+        inv_count_hint = "strictly 28–56 concise items total!"
+    else:
+        density_budget_block = """1. **LESS IS MORE — HARD TOP-VENUE DENSITY CAPS (`concise` mode — CVPR / NeurIPS / Nature style)**:
+   - **`[EXACT TEXT INVENTORY]` HARD CAP: 12 to 24 concise items MAX!** (NEVER output 40–70 tiny labels! Ruthlessly prune hyperparameters, tensor slices `[224:240]`, FPS/attribute counts, axis numbers, and micro-ops like `RMSNorm`/`Zero-init`/`clip`.)
+   - **`[HERO VISUAL ASSETS]` HARD CAP: 3 to 6 LARGE, CRISP visual heroes MAX!** (NEVER cram 12–16 postage-stamp thumbnails onto one figure! Give each hero visual generous size and open white breathing space.)
+   - **WHITESPACE MANDATE: At least 35% to 45% of the canvas MUST be pure `#FFFFFF` open breathing space!** Prefer a clean **single-tier left-to-right visual flow** (3–4 spacious macro stages with wide gaps) rather than stacking two crowded multi-system rows!"""
+        inv_count_hint = "strictly 12–24 items total!"
+
     style_clean = {k: v for k, v in style_dna.items() if k not in ("reference_files", "anchor_files")}
 
-    prompt = f"""You are a World-Class Scientific Illustrator & Visual Architect (SIGGRAPH / CVPR / NeurIPS / Nature).
+    prompt = f"""You are a World-Class Scientific Illustrator & Visual Architect (SIGGRAPH / CVPR / NeurIPS / IEEE S&P / Nature).
 Your job is to transform the grounded paper analysis + the user's distilled Reference Art Direction (`style_dna`)
 into a breathtaking, publication-grade **[VISUAL SCHEMA]** (`schema.md`) that looks like a flagship top-conference visual —
 **NOT a rigid Visio box-and-arrow flowchart!**
@@ -60,23 +75,20 @@ into a breathtaking, publication-grade **[VISUAL SCHEMA]** (`schema.md`) that lo
 {json.dumps(paper_analysis, ensure_ascii=False, indent=2)}
 ```
 
-=== ANTI-FLOWCHART, AIRY MINIMALISM & HARD INFORMATION BUDGETS (NON-NEGOTIABLE!) ===
-1. **LESS IS MORE — HARD TOP-VENUE DENSITY CAPS**:
-   - **`[EXACT TEXT INVENTORY]` HARD CAP: 12 to 24 concise items MAX!** (NEVER output 40–70 tiny labels! Ruthlessly prune hyperparameters, tensor slices `[224:240]`, FPS/attribute counts, axis numbers, and micro-ops like `RMSNorm`/`Zero-init`/`clip`.)
-   - **`[HERO VISUAL ASSETS]` HARD CAP: 3 to 6 LARGE, CRISP visual heroes MAX!** (NEVER cram 12–16 postage-stamp thumbnails onto one figure! Give each hero visual generous size and open white breathing space.)
-   - **WHITESPACE MANDATE: At least 35% to 45% of the canvas MUST be pure `#FFFFFF` open breathing space!** Prefer a clean **single-tier left-to-right visual flow** (3–4 spacious macro stages with wide gaps) rather than stacking two crowded multi-system rows!
+=== ANTI-FLOWCHART, VISUAL CRAFT & INFORMATION BUDGETS (NON-NEGOTIABLE!) ===
+{density_budget_block}
 2. **MAKE VISUALS THE HERO (~55-65% OF INK WEIGHT)**:
-   - Give the 3–6 hero visuals (e.g., realistic input/output images, physical sensing/3D visual, key intermediate representation, clean schematic) generous size so a reviewer understands the paper's core story in **3 seconds**.
+   - Give the hero visuals (e.g., realistic input/output images, physical sensing/3D visual, key intermediate representation, clean schematic) generous size so a reviewer understands the paper's core story in **3 seconds**.
 3. **RESPECT THE REFERENCE CONTAINER & ARROW PHILOSOPHY**:
-   - Follow `style_dna.container_philosophy` faithfully (e.g., open floating visuals, borderless soft pastel pills, solid colored header bars, or soft shadow cards).
+   - Follow `style_dna.container_philosophy` faithfully (e.g., open floating visuals, borderless soft pastel pills, solid colored header bars, flat pastel panels with crisp borders, or soft shadow cards).
    - DO NOT wrap every element in heavy dark borders or dashed boxes unless references truly do!
-   - Use the reference's actual arrow style (e.g., wide colored arrows, soft curved ribbons, or crisp clean connectors) — keep connectors minimal (<= 10 clean arrows total, ZERO spaghetti crossings!).
+   - Use the reference's actual arrow style (e.g., wide colored arrows, chunky white-filled block arrows, soft curved ribbons, or crisp clean connectors) — explicitly specify arrow DIRECTION (`pointing RIGHT`, `pointing UP`, `pointing DOWN`, `pointing LEFT`) for every connector in `[FLOW CONNECTIONS]`!
    - DO NOT hardcode pixel coordinates like `x=32-244` in the schema — describe airy spatial proportions so the Stage-1 image renderer can compose naturally with wide margins!
 4. **USE THE REFERENCE PALETTE**:
    - Use the exact harmonious colors distilled in `style_dna.palette`, making the paper's 2–3 core novel innovations pop effortlessly against neutral/standard parts.
 5. {lang_rule}
 6. **SINGLE SOURCE OF TRUTH FOR TEXT**:
-   - List EVERY single visible text string permitted in `[EXACT TEXT INVENTORY]` using straight ASCII double quotes `"..."` (strictly 12–24 items total!). Zero prose sentences, zero meta-label leaks!
+   - List EVERY single visible text string permitted in `[EXACT TEXT INVENTORY]` using straight ASCII double quotes `"..."` ({inv_count_hint}). Zero prose sentences, zero meta-label leaks!
 
 OUTPUT FORMAT (follow this clean Markdown structure directly, NO outer markdown fences):
 

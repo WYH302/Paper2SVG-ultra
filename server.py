@@ -77,6 +77,8 @@ ALLOWED_ARTIFACTS = {
     "stage1_draft.png",
     "stage1_draft_raw.png",
     "stage1_draft_ruler.png",
+    "stage1_draft_verify.png",
+    "stage1_draft_verify_calibrated.png",
     "stage1_draft_masked.png",
     "assets_manifest.json",
     "raw.svg",
@@ -113,6 +115,8 @@ def _start_pipeline_thread(
     reasoning_effort: Optional[str],
     image_model: Optional[str],
     svg_mode: Optional[str],
+    density: Optional[str] = None,
+    primary_ref: Optional[Path] = None,
     from_stage: int = 1,
     pause_after_schema: bool = False,
 ) -> None:
@@ -127,6 +131,8 @@ def _start_pipeline_thread(
                 settings.image_tool_model = image_model.strip()
             if svg_mode and svg_mode.strip():
                 settings.svg_mode = svg_mode.strip().lower()
+            if density and density.strip():
+                settings.density = density.strip().lower()
 
             def _on_event(evt_type: str, payload: dict[str, Any]) -> None:
                 job.push(evt_type, payload)
@@ -139,6 +145,8 @@ def _start_pipeline_thread(
                 lang=lang,
                 archetype_override=archetype or None,
                 svg_mode_override=settings.svg_mode,
+                density_override=settings.density,
+                primary_ref=primary_ref,
                 critic_rounds=critic_rounds,
                 from_stage=from_stage,
                 stop_after_stage=3 if pause_after_schema else None,
@@ -180,6 +188,7 @@ def get_config() -> JSONResponse:
             "image_tool_model": s.image_tool_model,
             "image_quality": s.image_quality,
             "svg_mode": s.svg_mode,
+            "density": s.density,
             "critic_rounds": s.critic_rounds,
             "font_family": s.font_family,
             "lang": s.lang,
@@ -236,6 +245,7 @@ async def start_run(
     paper_pdf: UploadFile = File(...),
     ref_images: list[UploadFile] = File(default=[]),
     refs_dir_path: str = Form(default=""),
+    primary_ref_path: str = Form(default=""),
     lang: str = Form(default="auto"),
     archetype: str = Form(default=""),
     critic_rounds: int = Form(default=2),
@@ -243,6 +253,7 @@ async def start_run(
     reasoning_effort: str = Form(default=""),
     image_model: str = Form(default=""),
     svg_mode: str = Form(default=""),
+    density: str = Form(default="auto"),
     pause_after_schema: bool = Form(default=False),
 ) -> JSONResponse:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -272,6 +283,13 @@ async def start_run(
             raise HTTPException(status_code=400, detail=f"Reference folder does not exist: {candidate}")
         resolved_refs_dir = candidate
 
+    resolved_primary_ref: Optional[Path] = None
+    if primary_ref_path.strip():
+        p_cand = Path(primary_ref_path.strip())
+        if not p_cand.is_file():
+            raise HTTPException(status_code=400, detail=f"Primary reference image does not exist: {p_cand}")
+        resolved_primary_ref = p_cand
+
     out_dir = OUTPUTS_DIR / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
     job = JobState(job_id=job_id, output_dir=out_dir)
@@ -288,6 +306,8 @@ async def start_run(
         reasoning_effort=reasoning_effort.strip() or None,
         image_model=image_model.strip() or None,
         svg_mode=svg_mode.strip() or None,
+        density=density.strip() or None,
+        primary_ref=resolved_primary_ref,
         from_stage=1,
         pause_after_schema=pause_after_schema,
     )
@@ -302,6 +322,7 @@ class ResumeRequest(BaseModel):
     main_model: Optional[str] = None
     reasoning_effort: Optional[str] = None
     svg_mode: Optional[str] = None
+    density: Optional[str] = None
 
 
 @app.post("/api/runs/{job_id}/resume")
@@ -317,6 +338,7 @@ def resume_run(job_id: str, req: ResumeRequest) -> JSONResponse:
     manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.is_file() else {}
     paper_pdf = Path(manifest.get("paper_pdf", ""))
     refs_dir = Path(manifest["refs_dir"]) if manifest.get("refs_dir") else None
+    primary_ref = Path(manifest["primary_ref"]) if manifest.get("primary_ref") else None
 
     job = JobState(job_id=job_id, output_dir=out_dir)
     JOBS[job_id] = job
@@ -332,6 +354,8 @@ def resume_run(job_id: str, req: ResumeRequest) -> JSONResponse:
         reasoning_effort=req.reasoning_effort or manifest.get("reasoning_effort"),
         image_model=req.image_model or manifest.get("image_tool_model"),
         svg_mode=req.svg_mode or manifest.get("svg_mode"),
+        density=req.density or manifest.get("density"),
+        primary_ref=primary_ref,
         from_stage=max(1, min(6, req.from_stage)),
         pause_after_schema=False,
     )

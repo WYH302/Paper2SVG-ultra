@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to a folder containing reference top-venue diagrams (PNG/JPG/WEBP)",
     )
     parser.add_argument(
+        "--primary-ref",
+        type=Path,
+        default=None,
+        help="Optional single reference image file to pin strictly as the Primary Style Winner (prevents multi-ref style blending)",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -77,6 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["hybrid_rich", "pure_vector"],
         default=None,
         help="hybrid_rich (default: editable vector cards/text/arrows + cropped HD visuals) or pure_vector",
+    )
+    parser.add_argument(
+        "--density",
+        choices=["auto", "concise", "detailed"],
+        default=None,
+        help="Diagram label density tier: auto (adaptive from inventory), concise (airy CVPR/Nature <=30 labels), or detailed (dense IEEE S&P/USENIX multi-panel systems diagram)",
     )
     parser.add_argument(
         "--critic-rounds",
@@ -139,9 +151,12 @@ def main() -> int:
         settings.image_tool_model = args.image_model
     if args.svg_mode:
         settings.svg_mode = args.svg_mode
+    if args.density:
+        settings.density = args.density
 
     paper_pdf: Path = args.paper.resolve()
     refs_dir: Path | None = args.refs.resolve() if args.refs else None
+    primary_ref: Path | None = args.primary_ref.resolve() if args.primary_ref else None
     if args.out:
         out_dir = args.out.resolve()
     else:
@@ -153,9 +168,10 @@ def main() -> int:
         Panel.fit(
             f"[bold]Paper PDF:[/bold] {paper_pdf}\n"
             f"[bold]Ref Folder:[/bold] {refs_dir or '(None — using default top-venue Style DNA)'}\n"
-            f"[bold]Output Dir:[/bold] {out_dir}\n"
+            + (f"[bold]Primary Ref:[/bold] {primary_ref}\n" if primary_ref else "")
+            + f"[bold]Output Dir:[/bold] {out_dir}\n"
             f"[bold]Models:[/bold] {settings.main_model} (effort={settings.reasoning_effort}) + {settings.image_tool_model or 'default'} (quality={settings.image_quality})\n"
-            f"[bold]SVG Mode:[/bold] {settings.svg_mode} | Start Stage: {args.from_stage}",
+            f"[bold]SVG Mode:[/bold] {settings.svg_mode} | [bold]Density:[/bold] {settings.density} | Start Stage: {args.from_stage}",
             title="[bold cyan]Paper2SVG-ultra[/bold cyan]",
         )
     )
@@ -175,6 +191,8 @@ def main() -> int:
         archetype_override=args.archetype,
         font_override=args.font,
         svg_mode_override=settings.svg_mode,
+        density_override=settings.density,
+        primary_ref=primary_ref,
         critic_rounds=args.critic_rounds,
         from_stage=args.from_stage,
         stop_after_stage=3 if args.pause_after_schema else None,

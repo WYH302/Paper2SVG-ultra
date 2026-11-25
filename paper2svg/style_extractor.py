@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from PIL import Image
 
@@ -66,8 +66,25 @@ DEFAULT_STYLE_DNA: dict[str, Any] = {
 }
 
 
-def discover_reference_images(refs_dir: Path, max_images: int = 6) -> list[Path]:
-    """Discover image files inside a reference folder, prioritizing largest/sharpest figures."""
+def discover_reference_images(
+    refs_dir: Optional[Path],
+    max_images: int = 6,
+    primary_ref: Optional[Path] = None,
+) -> list[Path]:
+    """Discover image files inside a reference folder, prioritizing largest/sharpest figures.
+
+    If `primary_ref` is explicitly provided, returns `[primary_ref]` directly as the sole
+    authoritative visual style anchor so other folder images never dilute its aesthetic.
+    """
+    if primary_ref is not None:
+        if not primary_ref.is_file():
+            raise FileNotFoundError(f"Primary reference image not found: {primary_ref}")
+        if primary_ref.suffix.lower() not in IMAGE_EXTENSIONS:
+            raise ValueError(f"Unsupported primary reference image format: {primary_ref.suffix}")
+        return [primary_ref]
+
+    if refs_dir is None:
+        return []
     if not refs_dir.exists():
         raise FileNotFoundError(f"Reference folder not found: {refs_dir}")
     if refs_dir.is_file() and refs_dir.suffix.lower() in IMAGE_EXTENSIONS:
@@ -132,17 +149,21 @@ OBSERVE CAREFULLY ACROSS THE REFERENCE IMAGES:
    - Explicitly note whether heavy dark outlines or dashed frames should be AVOIDED!
 4. **Arrow & Connector Craft**:
    - Are arrows **wide filled colored block arrows** (orange/blue/gradient), **soft curved ribbons**, **thick pastel connectors**, or crisp minimal vectors?
-5. **Anchor Selection**:
-   - Select the 1-2 visually strongest, cleanest reference image indices (1-based) in `top_anchor_indices` whose visual craft should directly anchor our Stage-1 generation for a `{target_archetype}` overview.
+5. **PRIMARY STYLE WINNER RULE (CRITICAL — ZERO STYLE DILUTION!)**:
+   - When multiple reference images are provided, **DO NOT average or blend conflicting aesthetics** across different images (e.g., never mix 3D glossy shading from one image with flat 2D black-bordered pastel cards from another)!
+   - Instead, pick the **SINGLE** visually cleanest, sharpest, most domain-fitting reference image (`top_anchor_indices`: `[winner_idx]`, strictly 1 index!) as the **Primary Style Winner**, and extract the palette, container borders, shadow policy, arrow craft, and rendering richness strictly from that single winner!
+6. **IGNORE REVIEW ANNOTATIONS & PAGE ARTIFACTS**:
+   - Completely IGNORE any hand-drawn red/blue pen marks, review circles, highlighter scribbles, PDF figure captions (`Figure 1: ...`), page headers/footers, or watermarks overlaid on reference screenshots. Extract ONLY the clean underlying figure design!
 
 STRICT CONTENT ISOLATION:
 - NEVER copy, transcribe, or mention ANY paper-specific text labels, model names, datasets, or method modules from the reference images. Describe ONLY visual style, composition grammar, color hexes, typography feel, container style, arrow style, and illustration craft!
 
 OUTPUT FORMAT:
-Return ONLY valid JSON (no markdown fences) matching this schema (replace EVERY angle-bracket value with your ACTUAL visual observations from the attached images!):
+Return ONLY valid JSON (no markdown fences) matching this schema (replace EVERY angle-bracket value with your ACTUAL visual observations from the Primary Style Winner image!):
 {{
   "visual_paradigm": "<concise slug, e.g. 3d_visual_progression | borderless_pastel_architecture | icon_rich_scientific_framework | multi_band_infographic | soft_card_editorial>",
-  "rendering_richness": "<2-3 specific sentences describing the exact illustration/3D/photo/icon craft seen in the references that MUST be recreated in our figure>",
+  "primary_anchor_reason": "<1 crisp sentence explaining why this single reference image was selected as the Primary Style Winner>",
+  "rendering_richness": "<2-3 specific sentences describing the exact illustration/3D/photo/icon craft seen in the Primary Style Winner that MUST be recreated in our figure>",
   "palette": {{
     "canvas_bg": "#FFFFFF",
     "neutral_surface": "<exact observed light neutral hex>",
@@ -196,6 +217,7 @@ Return ONLY valid JSON (no markdown fences) matching this schema (replace EVERY 
     merged = json.loads(json.dumps(DEFAULT_STYLE_DNA))
     for top_key in (
         "visual_paradigm",
+        "primary_anchor_reason",
         "rendering_richness",
         "visual_hero_guidance",
         "layout_rhythm_from_refs",
@@ -211,7 +233,8 @@ Return ONLY valid JSON (no markdown fences) matching this schema (replace EVERY 
                     merged[dict_key][k] = v
 
     raw_indices = parsed.get("top_anchor_indices") or [1]
-    valid_indices = [i for i in raw_indices if isinstance(i, int) and 1 <= i <= len(ref_images)][:2]
+    # Primary Style Winner: pin strictly to the SINGLE best reference anchor (length 1) to prevent style dilution
+    valid_indices = [i for i in raw_indices if isinstance(i, int) and 1 <= i <= len(ref_images)][:1]
     if not valid_indices:
         valid_indices = [1]
     merged["top_anchor_indices"] = valid_indices
@@ -229,7 +252,12 @@ def render_style_guide_markdown(style_dna: dict[str, Any]) -> str:
         "# Distilled Visual Art Direction & Style DNA (借骨架与画风，不借画中内容)",
         "",
         f"- **Reference Images Scanned**: {len(style_dna.get('reference_files', []))}",
-        f"- **Selected Visual Anchor(s)**: {', '.join(Path(p).name for p in style_dna.get('anchor_files', [])) or 'Default Editorial Style'}",
+        f"- **Primary Style Winner**: {', '.join(Path(p).name for p in style_dna.get('anchor_files', [])) or 'Default Editorial Style'}",
+        *(
+            [f"- **Selection Rationale**: {style_dna['primary_anchor_reason']}"]
+            if style_dna.get("primary_anchor_reason")
+            else []
+        ),
         f"- **Visual Paradigm**: `{style_dna.get('visual_paradigm', '')}`",
         f"- **Rendering Richness**: {style_dna.get('rendering_richness', '')}",
         f"- **Visual Hero Guidance**: {style_dna.get('visual_hero_guidance', '')}",

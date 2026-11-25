@@ -292,12 +292,24 @@
             </div>
           </div>
 
-          <label>视觉 Critic + 硬规则 Linter 精修轮数</label>
-          <select id="criticRounds">
-            <option value="2" selected>2 轮（推荐 · 质量与速度平衡）</option>
-            <option value="3">3 轮（极致打磨）</option>
-            <option value="1">1 轮（快速验证）</option>
-          </select>
+          <div class="row2">
+            <div>
+              <label>图面信息密度 (Density)</label>
+              <select id="density">
+                <option value="auto" selected>自动自适应（推荐）</option>
+                <option value="concise">精简顶会风（CVPR/Nature ≤30词）</option>
+                <option value="detailed">系统架构详图（S&amp;P/USENIX 多面板）</option>
+              </select>
+            </div>
+            <div>
+              <label>视觉 Critic 精修轮数</label>
+              <select id="criticRounds">
+                <option value="2" selected>2 轮（推荐）</option>
+                <option value="3">3 轮（极致打磨）</option>
+                <option value="1">1 轮（快速验证）</option>
+              </select>
+            </div>
+          </div>
 
           <label class="check-row">
             <input type="checkbox" id="pauseAfterSchema" />
@@ -429,6 +441,7 @@
       document.getElementById("reasoningEffort").value = cfg.reasoning_effort || "high";
       document.getElementById("imageModel").value = cfg.image_tool_model || "";
       document.getElementById("svgMode").value = cfg.svg_mode || "hybrid_rich";
+      document.getElementById("density").value = cfg.density || "auto";
       document.getElementById("criticRounds").value = String(cfg.critic_rounds || 2);
       const imgLabel = cfg.image_tool_model || "default image_gen";
       document.getElementById("badgeModels").textContent = `${cfg.main_model} (${cfg.reasoning_effort || "high"}) + ${imgLabel}`;
@@ -563,6 +576,7 @@
       fd.append("reasoning_effort", document.getElementById("reasoningEffort").value);
       fd.append("image_model", document.getElementById("imageModel").value.trim());
       fd.append("svg_mode", document.getElementById("svgMode").value);
+      fd.append("density", document.getElementById("density").value);
       fd.append("pause_after_schema", document.getElementById("pauseAfterSchema").checked ? "true" : "false");
 
       document.getElementById("startBtn").disabled = true;
@@ -599,6 +613,7 @@
           reasoning_effort: document.getElementById("reasoningEffort").value,
           image_model: document.getElementById("imageModel").value.trim(),
           svg_mode: document.getElementById("svgMode").value,
+          density: document.getElementById("density").value,
         }),
       });
       if (res.ok) connectSSE(currentJobId);

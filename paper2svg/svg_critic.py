@@ -13,9 +13,46 @@ from .asset_extractor import (
     hydrate_svg_assets,
     verify_assets_preserved,
 )
+from .config import resolve_density_mode
 from .svg_builder import extract_svg_block, fix_svg_xml_with_llm, normalize_svg_root
 from .svg_linter import LintReport, lint_svg, validate_svg_xml
 from .svg_renderer import render_dual_preview
+
+
+def check_critic_content_retention(
+    lint_before: LintReport,
+    lint_after: LintReport,
+    inventory: list[str],
+) -> tuple[bool, str]:
+    """Verify Critic refinement did not catastrophically delete diagram text content.
+
+    Uses total rendered characters + authoritative `[EXACT TEXT INVENTORY]` coverage ratio
+    instead of raw `<text>` tag count, so consolidating multi-line `<text>` elements into
+    `<tspan>` groups NEVER triggers a false rollback!
+    """
+    prev_chars = int(lint_before.stats.get("total_text_chars", 0) or 0)
+    new_chars = int(lint_after.stats.get("total_text_chars", 0) or 0)
+    prev_cov = float(lint_before.stats.get("inventory_coverage_ratio", 1.0) or 0.0)
+    new_cov = float(lint_after.stats.get("inventory_coverage_ratio", 1.0) or 0.0)
+    inv_total = int(lint_after.stats.get("inventory_total", 0) or 0)
+
+    if inventory and inv_total >= 4 and prev_cov >= 0.45:
+        min_allowed_cov = max(0.50, prev_cov - 0.25)
+        if new_cov < min_allowed_cov:
+            return (
+                False,
+                f"Patched SVG dropped too many required inventory labels "
+                f"(coverage {prev_cov * 100:.0f}% -> {new_cov * 100:.0f}%); keeping previous SVG.",
+            )
+
+    if prev_chars >= 40 and new_chars < prev_chars * 0.55:
+        return (
+            False,
+            f"Patched SVG dropped too much rendered text content "
+            f"({prev_chars} -> {new_chars} chars); keeping previous SVG.",
+        )
+
+    return True, ""
 
 
 def _parse_critique_json(raw_text: str) -> dict[str, Any]:
@@ -41,6 +78,7 @@ def refine_svg_with_critic(
     *,
     assets: Optional[list[ExtractedAsset]] = None,
     max_rounds: int = 2,
+    density: str = "auto",
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> tuple[str, Path, Path, str, list[dict[str, Any]]]:
     """Run iterative Deterministic Linter + Dual-Resolution Vision Critic refinement loop.
@@ -52,6 +90,7 @@ def refine_svg_with_critic(
     active_assets = assets or []
     inventory = extract_exact_text_inventory(schema_md)
     prompt_body = extract_prompt_body(schema_md)
+    resolved_density = resolve_density_mode(density, len(inventory))
 
     current_svg = initial_svg
     round_logs: list[dict[str, Any]] = []
@@ -79,33 +118,35 @@ def refine_svg_with_critic(
             exact_text_inventory=inventory,
             expected_viewbox=viewbox,
             rendered_png_path=full_png,
+            density=resolved_density,
         )
 
         # Dehydrate base64 strings -> compact __ASSET_<id>__ placeholders before sending SVG code to LLM
         compact_svg = dehydrate_svg_assets(current_svg, active_assets) if active_assets else current_svg
 
-        critic_prompt = f"""You are a Senior Scientific Art Director & NeurIPS / SIGGRAPH / CVPR Area Chair performing **Quality Refinement Round {r}/{max_rounds}** on an editable academic SVG diagram.
+        critic_prompt = f"""You are a Senior Scientific Art Director & NeurIPS / SIGGRAPH / CVPR / IEEE S&P Area Chair performing **Quality Refinement Round {r}/{max_rounds}** on an editable academic SVG diagram (`density={resolved_density}`).
 
 I am providing:
 1. **Image 1 (`stage1_draft.png`)**: The high-craft visual composition & aesthetic target.
 2. **Image 2 (`iter_{r - 1}_full.png`)**: The ACTUAL rendered output of our current SVG at full resolution.
 3. **Image 3 (`iter_{r - 1}_2col.png`)**: The ACTUAL rendered output shrunk to **7-inch two-column paper print width (700px)**.
-4. **Programmatic SVG Linter Audit**: Exact pixel-measured text overflows, print-size pt checks, font & meta-label checks.
+4. **Programmatic SVG Linter Audit**: Exact pixel-measured text overflows, canvas out-of-bounds clipping, print-size pt checks, font & meta-label checks.
 5. **Authoritative Visual Schema & Current SVG Source** (with compact `__ASSET_...__` placeholders for embedded crisp artwork).
 
 === PROGRAMMATIC AUDIT REPORT (FIX EVERY HARD ERROR FIRST!) ===
 {lint_before.to_prompt_feedback()}
 
-=== 8-POINT VISUAL CRITIC CHECKLIST ===
+=== 9-POINT VISUAL CRITIC CHECKLIST ===
 Inspect Image 2 (full) and Image 3 (2-column shrunk) carefully:
-1. **PRESERVE VISUAL ARTISTRY — DO NOT DOWNGRADE TO A PLAIN WIREFRAME FLOWCHART**: Keep the rich visual aesthetic, soft borderless/tinted zones, wide colored arrows, and hero visual prominence of `stage1_draft.png`! Do NOT add heavy ugly black boxes around elements that should breathe openly.
-2. **ZERO TEXT OVERFLOW OR CLIPPING**: Every text label must sit cleanly with >= 14px breathing room; wrap onto 2 `<tspan>` lines or widen boxes wherever overflow occurs.
-3. **TWO-COLUMN PRINT LEGIBILITY (Image 3)**: Every label MUST be effortlessly readable when shrunk to 700px wide. Enlarge tiny labels or clean up cluttered micro-text.
-4. **ZERO COLLISIONS / OVERLAPS**: Ensure NO text overlaps arrows, borders, or embedded `<image>` artwork.
-5. **ARROW PRECISION & CRAFT**: Every arrow starts/ends cleanly at its visual boundary with clear directional heads matching `stage1_draft.png`.
-6. **100% SCIENTIFIC & TEXT ACCURACY**: Compare against `[EXACT TEXT INVENTORY]` — zero typos, zero sentences, zero leaked meta-labels.
-7. **VISUAL ALIGNMENT & WHITESPACE**: Align rows, columns, headers, and visual assets cleanly with generous breathing space.
-8. **FONT & COLOR DISCIPLINE**: Single unified sans-serif font, faithful harmonious palette matching `stage1_draft.png`.
+1. **PRESERVE VISUAL ARTISTRY — DO NOT DOWNGRADE TO A PLAIN WIREFRAME FLOWCHART**: Keep the rich visual aesthetic, exact palette, border/borderless container craft, and hero visual prominence of `stage1_draft.png`!
+2. **ZERO TEXT OVERFLOW, ZERO `textLength` SQUASHING, & ZERO CANVAS CLIPPING**: Fix EVERY box overflow AND EVERY right/bottom/left/top canvas-edge clipping (`x in [14, {w - 14}]`, `y in [14, {h - 14}]`). NEVER use `textLength` or `lengthAdjust="spacingAndGlyphs"` to compress text horizontally! Instead widen pills/cards, wrap onto 2 `<tspan>` lines, or adjust column spacing rather than deleting labels!
+3. **NEVER DELETE REQUIRED INVENTORY LABELS**: Preserve ALL authoritative labels from `[EXACT TEXT INVENTORY]`! You may group multi-line text with `<tspan>` cleanly, but NEVER drop required module names to solve crowding!
+4. **TWO-COLUMN PRINT LEGIBILITY (Image 3)**: Every label MUST be effortlessly readable when shrunk to 700px wide.
+5. **ZERO COLLISIONS / OVERLAPS**: Ensure NO text or panel border collides with arrows or embedded `<image>` artwork.
+6. **ARROW DIRECTION & TOPOLOGY AUDIT (CRITICAL!)**: Check EVERY arrow in Image 2 against BOTH Image 1 and `[FLOW CONNECTIONS]` — verify EVERY arrowhead points in the exact right direction (`UP` vs `DOWN`, `LEFT` vs `RIGHT`) and sits cleanly in open gutters without crossing borders!
+7. **100% SCIENTIFIC & TEXT ACCURACY**: Compare against `[EXACT TEXT INVENTORY]` — zero typos, zero sentences, zero leaked meta-labels.
+8. **VISUAL ALIGNMENT & WHITESPACE**: Align rows, columns, headers, and visual assets cleanly with balanced breathing space.
+9. **FONT & COLOR DISCIPLINE**: Single unified sans-serif font, faithful harmonious palette matching `stage1_draft.png`.
 
 === SURGICAL PATCHING & ASSET SAFETY RULES ===
 {asset_guard_clause}
@@ -129,19 +170,36 @@ Immediately followed by the COMPLETE improved SVG starting with `<svg` and endin
         if on_progress:
             on_progress(f"Stage 6 Critic Round {r}/{max_rounds}: Consulting {client.settings.main_model} vision critic...")
 
-        raw_reply = client.generate_multimodal(
-            [
-                critic_prompt,
-                "Image 1 — Stage-1 Art-Direction Anchor (`stage1_draft.png`):",
-                draft_path,
-                f"Image 2 — Current SVG Full-Res Render (`iter_{r - 1}_full.png`):",
-                full_png,
-                f"Image 3 — Current SVG Simulated 2-Column Print Preview (`iter_{r - 1}_2col.png`):",
-                twocol_png,
-            ],
-            max_output_tokens=64000,
-            temperature=0.15,
-        )
+        try:
+            raw_reply = client.generate_multimodal(
+                [
+                    critic_prompt,
+                    "Image 1 — Stage-1 Art-Direction Anchor (`stage1_draft.png`):",
+                    draft_path,
+                    f"Image 2 — Current SVG Full-Res Render (`iter_{r - 1}_full.png`):",
+                    full_png,
+                    f"Image 3 — Current SVG Simulated 2-Column Print Preview (`iter_{r - 1}_2col.png`):",
+                    twocol_png,
+                ],
+                max_output_tokens=64000,
+                temperature=0.15,
+            )
+        except Exception as exc:
+            err_msg = f"Critic Round {r} interrupted by upstream API error ({exc}); preserving best verified SVG."
+            if on_progress:
+                on_progress(f"Stage 6 Critic Round {r}/{max_rounds} warning: {err_msg}")
+            round_logs.append(
+                {
+                    "round": r,
+                    "renderer": renderer_used,
+                    "lint_errors_before": len(lint_before.errors),
+                    "lint_warnings_before": len(lint_before.warnings),
+                    "critique": {},
+                    "accepted": False,
+                    "reject_reason": err_msg,
+                }
+            )
+            break
 
         critique_meta = _parse_critique_json(raw_reply)
         candidate_template = normalize_svg_root(extract_svg_block(raw_reply), w, h)
@@ -166,13 +224,15 @@ Immediately followed by the COMPLETE improved SVG starting with `<svg` and endin
                     hydrated_candidate = (
                         hydrate_svg_assets(candidate_template, active_assets) if active_assets else candidate_template
                     )
-                    lint_after = lint_svg(hydrated_candidate, exact_text_inventory=inventory, expected_viewbox=viewbox)
-                    prev_texts = int(lint_before.stats.get("text_elements", 0) or 0)
-                    new_texts = int(lint_after.stats.get("text_elements", 0) or 0)
-                    if prev_texts >= 4 and new_texts < prev_texts * 0.5:
-                        reject_reason = (
-                            f"Patched SVG dropped too many labels ({prev_texts} -> {new_texts}); keeping previous SVG."
-                        )
+                    lint_after = lint_svg(
+                        hydrated_candidate,
+                        exact_text_inventory=inventory,
+                        expected_viewbox=viewbox,
+                        density=resolved_density,
+                    )
+                    retained_ok, retained_msg = check_critic_content_retention(lint_before, lint_after, inventory)
+                    if not retained_ok:
+                        reject_reason = retained_msg
                     else:
                         current_svg = hydrated_candidate
                         accepted = True
@@ -189,7 +249,12 @@ Immediately followed by the COMPLETE improved SVG starting with `<svg` and endin
             }
         )
 
-        lint_now = lint_svg(current_svg, exact_text_inventory=inventory, expected_viewbox=viewbox)
+        lint_now = lint_svg(
+            current_svg,
+            exact_text_inventory=inventory,
+            expected_viewbox=viewbox,
+            density=resolved_density,
+        )
         score = float(critique_meta.get("score_10") or 0.0)
         if accepted and lint_now.passed_hard_checks and score >= 9.5:
             if on_progress:
@@ -208,6 +273,7 @@ Immediately followed by the COMPLETE improved SVG starting with `<svg` and endin
         exact_text_inventory=inventory,
         expected_viewbox=viewbox,
         rendered_png_path=final_png_path,
+        density=resolved_density,
     )
     qa_md = _build_qa_report(final_lint, round_logs, final_renderer, viewbox, len(active_assets))
     (output_dir / "qa.md").write_text(qa_md, encoding="utf-8")

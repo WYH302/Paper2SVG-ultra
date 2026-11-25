@@ -60,6 +60,8 @@ def run_pipeline(
     archetype_override: Optional[str] = None,
     font_override: Optional[str] = None,
     svg_mode_override: Optional[str] = None,
+    density_override: Optional[str] = None,
+    primary_ref: Optional[Path] = None,
     critic_rounds: Optional[int] = None,
     from_stage: int = 1,
     stop_after_stage: Optional[int] = None,
@@ -88,6 +90,7 @@ def run_pipeline(
     client = ResponsesAPIClient(settings)
     rounds = critic_rounds if critic_rounds is not None else settings.critic_rounds
     svg_mode = (svg_mode_override or settings.svg_mode or "hybrid_rich").strip().lower()
+    density = (density_override or settings.density or "auto").strip().lower()
 
     paper_analysis_path = output_dir / "paper_analysis.json"
     paper_method_path = output_dir / "paper_method.md"
@@ -110,7 +113,7 @@ def run_pipeline(
         )
         pdf_info = extract_pdf_sections(paper_pdf)
         resolved_lang = pdf_info["detected_lang"] if (lang or settings.lang) == "auto" else (lang or settings.lang)
-        paper_analysis = analyze_paper_structure(client, pdf_info, target_lang=resolved_lang)
+        paper_analysis = analyze_paper_structure(client, pdf_info, target_lang=resolved_lang, density=density)
         paper_analysis["_resolved_lang"] = resolved_lang
         paper_analysis["_pdf_pages"] = pdf_info["num_pages"]
         paper_analysis_path.write_text(json.dumps(paper_analysis, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -133,7 +136,7 @@ def run_pipeline(
 
     # ---- STAGE 2: Visual Art-Director Style DNA Extraction ----
     if from_stage <= 2 or not style_dna_path.is_file():
-        ref_images = discover_reference_images(refs_dir) if refs_dir else []
+        ref_images = discover_reference_images(refs_dir, primary_ref=primary_ref) if (refs_dir or primary_ref) else []
         emit(
             f"Stage 2/6: Extracting true Visual Art Direction from {len(ref_images)} reference image(s)...",
             {"stage": 2},
@@ -164,6 +167,7 @@ def run_pipeline(
             font_family=font_family,
             target_lang=resolved_lang,
             archetype_override=chosen_archetype_key,
+            density=density,
         )
         schema_path.write_text(schema_md, encoding="utf-8")
         emit("Stage 3/6 complete: Visual Schema blueprint saved to schema.md.", {"stage": 3, "artifact": "schema.md"})
@@ -183,6 +187,8 @@ def run_pipeline(
             lang=resolved_lang,
             font_family=font_family,
             svg_mode=svg_mode,
+            density=density,
+            primary_ref=primary_ref,
             embedded_assets_count=0,
             status="paused_after_schema",
             elapsed=elapsed,
@@ -216,6 +222,7 @@ def run_pipeline(
             style_dna,
             archetype,
             output_dir,
+            density=density,
         )
         (output_dir / "stage4_meta.json").write_text(json.dumps(draft_meta, ensure_ascii=False, indent=2), encoding="utf-8")
         emit(
@@ -245,6 +252,7 @@ def run_pipeline(
             output_dir,
             font_family=font_family,
             svg_mode=svg_mode,
+            density=density,
         )
         raw_svg_path.write_text(raw_svg, encoding="utf-8")
         emit(
@@ -267,6 +275,7 @@ def run_pipeline(
         output_dir,
         assets=assets,
         max_rounds=rounds,
+        density=density,
         on_progress=lambda msg: emit(msg, {"stage": 6}),
     )
 
@@ -281,6 +290,8 @@ def run_pipeline(
         lang=resolved_lang,
         font_family=font_family,
         svg_mode=svg_mode,
+        density=density,
+        primary_ref=primary_ref,
         embedded_assets_count=len(assets),
         status="completed",
         elapsed=elapsed,
@@ -321,6 +332,8 @@ def _write_manifest(
     lang: str,
     font_family: str,
     svg_mode: str,
+    density: str = "auto",
+    primary_ref: Optional[Path] = None,
     embedded_assets_count: int,
     status: str,
     elapsed: float,
@@ -331,11 +344,13 @@ def _write_manifest(
         "status": status,
         "paper_pdf": str(paper_pdf),
         "refs_dir": str(refs_dir) if refs_dir else None,
+        "primary_ref": str(primary_ref) if primary_ref else None,
         "main_model": settings.main_model,
         "reasoning_effort": settings.reasoning_effort,
         "image_tool_model": settings.image_tool_model,
         "image_quality": settings.image_quality,
         "svg_mode": svg_mode,
+        "density": density,
         "embedded_assets_count": embedded_assets_count,
         "archetype": archetype.key,
         "archetype_name": f"{archetype.zh_name} / {archetype.en_name}",

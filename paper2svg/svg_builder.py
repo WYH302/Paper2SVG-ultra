@@ -15,6 +15,7 @@ from .asset_extractor import (
     hydrate_svg_assets,
     inject_missing_assets,
 )
+from .config import resolve_density_mode
 from .svg_linter import TWO_COLUMN_WIDTH_PT, validate_svg_xml
 
 
@@ -94,6 +95,7 @@ def build_editable_svg(
     *,
     font_family: str,
     svg_mode: str = "hybrid_rich",
+    density: str = "auto",
     cached_assets: Optional[list[ExtractedAsset]] = None,
 ) -> tuple[str, list[ExtractedAsset], bool, list[str]]:
     """Reconstruct a publication-grade editable SVG faithfully preserving BOTH visual artistry & editability.
@@ -105,14 +107,43 @@ def build_editable_svg(
       (cards/zones, colored header bands, wide arrows, equations, and crisp `<text>` labels).
     - In `pure_vector` mode:
       Draws everything purely using SVG vector primitives.
+    - Adaptive density (`concise` vs `detailed`): calibrates typography floors & box padding cleanly
+      so both airy CVPR/Nature single-strip figures and dense IEEE S&P / USENIX multi-panel system
+      architectures render with ZERO text overflow and ZERO canvas clipping.
     """
     w, h = viewbox
+    prompt_body = extract_prompt_body(schema_md)
+    inventory = extract_exact_text_inventory(schema_md)
+    resolved_density = resolve_density_mode(density, len(inventory))
+
     pt_scale = TWO_COLUMN_WIDTH_PT / float(w)
-    px_title = int(round(10.5 / pt_scale))
-    px_panel = int(round(9.5 / pt_scale))
-    px_module = int(round(8.2 / pt_scale))
-    px_sub = int(round(6.8 / pt_scale))
-    px_floor = int(round(6.4 / pt_scale))
+    if resolved_density == "detailed":
+        # Calibrated for dense multi-panel IEEE S&P / USENIX / OSDI system diagrams (~35-70 labels)
+        px_title = int(round(7.6 / pt_scale))
+        px_panel = int(round(6.8 / pt_scale))
+        px_module = int(round(5.3 / pt_scale))
+        px_sub = int(round(4.6 / pt_scale))
+        px_floor = int(round(4.3 / pt_scale))
+        box_pad_px = 10
+        density_note = (
+            f"DENSE SYSTEMS ARCHITECTURE TIER (`detailed`, {len(inventory)} inventory labels): "
+            f"Use crisp, compact academic typography (`{px_panel}px` panel titles, `{px_module}px` card headers, "
+            f"`{px_sub}px` pill/module labels, `{px_floor}px` legend/arrow tags) and verify EVERY capsule width "
+            f"satisfies `width >= len(longest_line) * font_size * 0.62 + 16` so ZERO letters ever overflow a box!"
+        )
+    else:
+        # Calibrated for airy CVPR / NeurIPS / Nature overview strips (<= 30 labels)
+        px_title = int(round(10.5 / pt_scale))
+        px_panel = int(round(9.5 / pt_scale))
+        px_module = int(round(8.2 / pt_scale))
+        px_sub = int(round(6.8 / pt_scale))
+        px_floor = int(round(6.4 / pt_scale))
+        box_pad_px = 14
+        density_note = (
+            f"AIRY OVERVIEW TIER (`concise`, {len(inventory)} inventory labels): "
+            f"Use large, bold, effortless two-column typography (`{px_panel}px` panel titles, "
+            f"`{px_module}px` module titles, `{px_sub}px` sub-labels, floor `{px_floor}px`) with generous whitespace."
+        )
 
     assets: list[ExtractedAsset] = []
     if svg_mode == "hybrid_rich":
@@ -121,8 +152,6 @@ def build_editable_svg(
         else:
             assets = detect_and_crop_visual_assets(client, draft_path, output_dir, viewbox)
 
-    prompt_body = extract_prompt_body(schema_md)
-    inventory = extract_exact_text_inventory(schema_md)
     pal = style_dna.get("palette", {})
     cont = style_dna.get("container_philosophy", {})
     arr = style_dna.get("arrow_craft", {})
@@ -167,12 +196,20 @@ CRITICAL DUAL FIDELITY MANDATE:
 
 {asset_instructions}
 
-EXACT CANVAS & VIEWBOX:
+EXACT CANVAS & VIEWBOX SAFE-ZONE MANDATE:
 - Root tag MUST be:
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`
 - First child: `<rect x="0" y="0" width="{w}" height="{h}" fill="{pal.get('canvas_bg', '#FFFFFF')}"/>`
+- **STRICT SAFE-ZONE**: EVERY visible `<rect>`, `<image>`, `<text>`, `<path>`, and arrow MUST remain strictly inside `x in [14, {w - 14}]` and `y in [14, {h - 14}]`! Explicitly verify the rightmost column/card satisfies `x + width <= {w - 14}` and centered captions satisfy `x + text_width / 2 <= {w - 12}` so NOTHING is clipped at the right or bottom edge!
 
-TWO-COLUMN PRINT TYPOGRAPHY CALIBRATION (MANDATORY FOR 7-INCH PRINT LEGIBILITY):
+ARROW DIRECTION & TOPOLOGY FIDELITY MANDATE (CRITICAL!):
+- Verify the EXACT arrowhead orientation of EVERY connector against BOTH `stage1_draft.png` AND `[FLOW CONNECTIONS]`:
+  * If a lower panel feeds **UP** into an upper panel, the arrowhead tip MUST point **UPWARD** (`y_tip < y_base`), NEVER downward!
+  * If a feedback/RSI connector flows **RIGHT-TO-LEFT**, the arrowhead tip MUST point **LEFT** (`x_tip < x_base`)!
+  * Every inter-panel block arrow MUST sit cleanly in the white gutter between panels without overlapping panel strokes, corners, or labels!
+
+TWO-COLUMN PRINT TYPOGRAPHY CALIBRATION ({resolved_density.upper()} TIER):
+- {density_note}
 - Single unified sans-serif font across ALL text: `font-family="{font_family}"` (NO Serif mixing, NO Comic Sans MS).
 - Define clean `<style>` classes calibrated to this {w}x{h} canvas:
   * `.title-text`   -> `font-size: {px_title}px; font-weight: 700; fill: {pal.get('text_primary', '#111827')};`
@@ -181,7 +218,8 @@ TWO-COLUMN PRINT TYPOGRAPHY CALIBRATION (MANDATORY FOR 7-INCH PRINT LEGIBILITY):
   * `.sub-label`    -> `font-size: {px_sub}px; font-weight: 500; fill: {pal.get('text_secondary', '#4B5563')};`
   * `.arrow-label`  -> `font-size: {px_floor}px; font-weight: 600; fill: {pal.get('text_secondary', '#4B5563')};`
 - **HARD FLOOR**: NEVER use `font-size` smaller than `{px_floor}px` on any readable label!
-- Center labels cleanly with `text-anchor="middle"` and `dominant-baseline="central"`, giving >= 14px horizontal padding inside cards; wrap multi-word labels onto 2 `<tspan>` lines rather than letting text overflow borders.
+- **NEVER USE `textLength` OR `lengthAdjust="spacingAndGlyphs"`** (horizontal glyph squashing ruins publication typography!). Always wrap multi-word labels cleanly onto 2 `<tspan>` lines or widen their container instead.
+- Center labels cleanly with `text-anchor="middle"` and `dominant-baseline="central"`, giving >= {box_pad_px}px horizontal padding inside cards/pills; wrap multi-word labels onto 2 `<tspan>` lines rather than letting text overflow borders.
 
 CLEAN 5-LAYER SEMANTIC GROUPING (FOR EASY EDITING IN ILLUSTRATOR / FIGMA / SVG-EDIT):
 1. `<defs>`: reusable arrowheads / custom wide arrow markers / gradients / soft shadow filter (`#soft-shadow`) / clipPaths for framed assets.
