@@ -124,36 +124,39 @@ def refine_svg_with_critic(
         # Dehydrate base64 strings -> compact __ASSET_<id>__ placeholders before sending SVG code to LLM
         compact_svg = dehydrate_svg_assets(current_svg, active_assets) if active_assets else current_svg
 
-        critic_prompt = f"""You are a Senior Scientific Art Director & NeurIPS / SIGGRAPH / CVPR / IEEE S&P Area Chair performing **Quality Refinement Round {r}/{max_rounds}** on an editable academic SVG diagram (`density={resolved_density}`).
+        critic_prompt = f"""You are a Brutally Honest Principal Art Director (IEEE S&P / SIGGRAPH / CVPR / Nature) performing **Visual Fidelity Refinement Round {r}/{max_rounds}** on an editable academic SVG (`viewBox="0 0 {w} {h}"`, `density={resolved_density}`).
 
-I am providing:
-1. **Image 1 (`stage1_draft.png`)**: The high-craft visual composition & aesthetic target.
-2. **Image 2 (`iter_{r - 1}_full.png`)**: The ACTUAL rendered output of our current SVG at full resolution.
-3. **Image 3 (`iter_{r - 1}_2col.png`)**: The ACTUAL rendered output shrunk to **7-inch two-column paper print width (700px)**.
-4. **Programmatic SVG Linter Audit**: Exact pixel-measured text overflows, canvas out-of-bounds clipping, print-size pt checks, font & meta-label checks.
-5. **Authoritative Visual Schema & Current SVG Source** (with compact `__ASSET_...__` placeholders for embedded crisp artwork).
+YOUR NORTH STAR — **MAKE IMAGE 2 LOOK JUST AS GORGEOUS AS IMAGE 1 (`stage1_draft.png`)!**
+DO NOT rubber-stamp an ugly figure with a fake 9.5/10 score! Compare **Image 2 (`iter_{r - 1}_full.png`, our current SVG with all {len(active_assets)} embedded HD icons)** side-by-side against **Image 1 (`stage1_draft.png`, the visual gold standard)** and **Image 3 (700px 2-column print preview)**!
 
 === PROGRAMMATIC AUDIT REPORT (FIX EVERY HARD ERROR FIRST!) ===
 {lint_before.to_prompt_feedback()}
 
-=== 9-POINT VISUAL CRITIC CHECKLIST ===
-Inspect Image 2 (full) and Image 3 (2-column shrunk) carefully:
-1. **PRESERVE VISUAL ARTISTRY — DO NOT DOWNGRADE TO A PLAIN WIREFRAME FLOWCHART**: Keep the rich visual aesthetic, exact palette, border/borderless container craft, and hero visual prominence of `stage1_draft.png`!
-2. **ZERO TEXT OVERFLOW, ZERO `textLength` SQUASHING, & ZERO CANVAS CLIPPING**: Fix EVERY box overflow AND EVERY right/bottom/left/top canvas-edge clipping (`x in [14, {w - 14}]`, `y in [14, {h - 14}]`). NEVER use `textLength` or `lengthAdjust="spacingAndGlyphs"` to compress text horizontally! Instead widen pills/cards, wrap onto 2 `<tspan>` lines, or adjust column spacing rather than deleting labels!
-3. **NEVER DELETE REQUIRED INVENTORY LABELS**: Preserve ALL authoritative labels from `[EXACT TEXT INVENTORY]`! You may group multi-line text with `<tspan>` cleanly, but NEVER drop required module names to solve crowding!
-4. **TWO-COLUMN PRINT LEGIBILITY (Image 3)**: Every label MUST be effortlessly readable when shrunk to 700px wide.
-5. **ZERO COLLISIONS / OVERLAPS**: Ensure NO text or panel border collides with arrows or embedded `<image>` artwork.
-6. **ARROW DIRECTION & TOPOLOGY AUDIT (CRITICAL!)**: Check EVERY arrow in Image 2 against BOTH Image 1 and `[FLOW CONNECTIONS]` — verify EVERY arrowhead points in the exact right direction (`UP` vs `DOWN`, `LEFT` vs `RIGHT`) and sits cleanly in open gutters without crossing borders!
-7. **100% SCIENTIFIC & TEXT ACCURACY**: Compare against `[EXACT TEXT INVENTORY]` — zero typos, zero sentences, zero leaked meta-labels.
-8. **VISUAL ALIGNMENT & WHITESPACE**: Align rows, columns, headers, and visual assets cleanly with balanced breathing space.
-9. **FONT & COLOR DISCIPLINE**: Single unified sans-serif font, faithful harmonious palette matching `stage1_draft.png`.
+=== STRICT SIDE-BY-SIDE VISUAL FIDELITY AUDIT (CHECK EVERY SINGLE PANEL!) ===
+Scan Image 2 vs Image 1 left-to-right, top-to-bottom and fix EVERY visual flaw:
+1. **PER-ARROW DIRECTION, COMPLETENESS & BOLDNESS AUDIT (CRITICAL!)**:
+   - Trace EVERY SINGLE inter-panel block arrow in Image 2 ONE BY ONE against Image 1 AND `[FLOW CONNECTIONS]`:
+     * For EACH vertical arrow (left vertical arrow, right vertical arrow, combine arrow) and horizontal arrow (top row arrows, bottom row return/output arrows), verify the exact arrowhead tip direction (`UP` vs `DOWN`, `LEFT` vs `RIGHT`)! If ANY arrow in Image 2 points the opposite direction of Image 1 (e.g., pointing UP when Image 1 points DOWN!), **FLIP IT IMMEDIATELY**!
+   - Is ANY arrow present in Image 1 MISSING in Image 2, skinnier/crooked, or disconnected from panel borders? Redraw it bold, symmetric, cleanly spanning the gutter!
+   - Does ANY intra-panel arrow pierce into an icon, collide with text, or float awkwardly? Fix its exact start/end coordinates!
+2. **TYPOGRAPHY BOLDNESS, CONTRAST & ZERO COLLISIONS**:
+   - Match Image 1's **bold, crisp dark `#111111` ink weight** — NEVER leave headings or sub-labels pale grey or timid/tiny when Image 1 makes them bold black!
+   - Check EVERY text label in Image 2: does ANY label touch/overlap an icon, waveform, border, arrow, or neighboring card? Move or wrap onto 2 clean `<tspan>` lines!
+   - NEVER use `textLength` or `lengthAdjust="spacingAndGlyphs"` horizontal squashing, and NEVER delete required `[EXACT TEXT INVENTORY]` labels!
+3. **EMBEDDED HD ASSET ALIGNMENT & ZERO DUPLICATE DOODLES**:
+   - Inspect all {len(active_assets)} embedded `<image href="__ASSET_...__"/>` icons in Image 2: ensure ZERO ugly hand-drawn SVG lines sit behind/over them, and fine-tune `(x, y, width, height)` by a few pixels ONLY if needed to align cleanly with arrows and captions.
+4. **PANEL & CARD GEOMETRY / FLAT COLOR FIDELITY**:
+   - Verify all top-row panels share identical top & bottom Y, all bottom-row panels share identical top & bottom Y, uniform white gutters, crisp uniform borders, and pure flat fills matching Image 1 (remove any unwanted gradients/shadows if Image 1 is flat 2D!).
+5. **CANVAS SAFE-ZONE & TWO-COLUMN LEGIBILITY (Image 3)**:
+   - Keep EVERY element strictly inside `[10, {w - 10}] x [10, {h - 10}]` and effortlessly readable in Image 3 (700px wide).
+6. **HONEST SCORING RULE**:
+   - Give `< 8.0` if ANY arrow is missing/skinny/misaligned, ANY label collides with an icon/border, or typography looks noticeably weaker than Image 1. Only give `>= 9.3` when Image 2 truly rivals Image 1 in visual polish!
 
 === SURGICAL PATCHING & ASSET SAFETY RULES ===
 {asset_guard_clause}
-- Keep `viewBox="0 0 {w} {h}" width="{w}" height="{h}"` and clean semantic `<g>` layers.
-- Preserve everything that already looks awesome — make targeted, high-precision geometric and typographic fixes.
+- Keep exact `viewBox="0 0 {w} {h}" width="{w}" height="{h}"` and clean 5-layer `<g>` grouping.
 
-=== AUTHORITATIVE VISUAL SCHEMA ===
+=== AUTHORITATIVE VISUAL SCHEMA & TEXT INVENTORY ===
 {prompt_body}
 
 === CURRENT SVG SOURCE ===
@@ -162,8 +165,8 @@ Inspect Image 2 (full) and Image 3 (2-column shrunk) carefully:
 ```
 
 OUTPUT FORMAT:
-First output a brief JSON critique block (between `{{` and `}}`):
-`{{"score_10": 8.8, "two_col_readable": true, "issues_found": ["..."], "fixes_applied": ["..."]}}`
+First output a brief, brutally honest JSON critique block (between `{{` and `}}`) that EXPLICITLY verifies every inter-panel arrow's direction in Image 2 vs Image 1:
+`{{"score_10": 8.2, "two_col_readable": true, "arrow_direction_audit": [{{"connector": "Panel A -> Panel B", "expected": "DOWN", "seen_in_iter": "UP", "fixed": true}}], "issues_found": ["..."], "fixes_applied": ["..."]}}`
 Immediately followed by the COMPLETE improved SVG starting with `<svg` and ending with `</svg>` (NO markdown fences around the SVG).
 """
 

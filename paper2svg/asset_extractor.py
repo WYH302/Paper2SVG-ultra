@@ -153,8 +153,8 @@ def smart_remove_border_background(crop_img: Image.Image, tolerance: float = 18.
 
     # Check if perimeter actually has a reasonably uniform background (skip if photo fills the whole frame)
     border_dists = np.linalg.norm(border_pixels - bg_color, axis=1)
-    uniform_ratio = float(np.mean(border_dists < tolerance * 1.1))
-    if uniform_ratio < 0.65:
+    uniform_ratio = float(np.mean(border_dists < tolerance * 1.15))
+    if uniform_ratio < 0.45:
         return rgba, (0, 0, 0, 0)
 
     dist_map = np.linalg.norm(rgb - bg_color, axis=2)
@@ -247,10 +247,32 @@ def smart_remove_border_background(crop_img: Image.Image, tolerance: float = 18.
     return trimmed, (tx0, ty0, w - tx1, h - ty1)
 
 
+def _find_1d_bands(counts: np.ndarray) -> list[tuple[int, int, int]]:
+    """Find contiguous non-zero index spans as (start, end_incl, total_sum)."""
+    bands: list[tuple[int, int, int]] = []
+    in_band = False
+    b_start = 0
+    n = len(counts)
+    for i in range(n):
+        if counts[i] > 0 and not in_band:
+            in_band = True
+            b_start = i
+        elif counts[i] == 0 and in_band:
+            in_band = False
+            bands.append((b_start, i - 1, int(np.sum(counts[b_start:i]))))
+    if in_band:
+        bands.append((b_start, n - 1, int(np.sum(counts[b_start:n]))))
+    return bands
+
+
 def strip_edge_text_bleed(crop_img: Image.Image) -> tuple[Image.Image, tuple[int, int, int, int]]:
-    """Deterministically strip tiny clipped text slivers touching the top or bottom crop edge
-    (e.g. top 4-6px of a caption grazed at y2, separated from the main graphic by >=2px of uniform
-    white/transparent backdrop). Preserves photos and multi-row graphics untouched.
+    """Deterministically strip stray clipped text captions or card-border slivers touching the outer
+    edges of a cropped icon (e.g. a single bold caption line like `VLM` / `SSIM /` / `Stop &` /
+    `Refined` directly below an icon, or a stray letter / 3px card-border sliver at left/right),
+    separated by a clean blank white/transparent gap from the main graphic.
+
+    Preserves full-bleed photos/spectrograms and equal-height multi-row graphics (e.g. 3 stacked
+    waveforms or 3 skill bars) 100% untouched.
     """
     rgba = crop_img.convert("RGBA")
     arr = np.asarray(rgba, dtype=np.float32)
@@ -260,69 +282,244 @@ def strip_edge_text_bleed(crop_img: Image.Image) -> tuple[Image.Image, tuple[int
 
     alpha = arr[:, :, 3]
     rgb = arr[:, :, :3]
-    # Estimate canvas/card backdrop from the lightest 15% opaque pixels (usually white #FFFFFF or pale card)
     opaque_rgb = rgb[alpha > 15]
     if len(opaque_rgb) < 20:
         return rgba, (0, 0, 0, 0)
     bg_est = np.percentile(opaque_rgb, 92, axis=0)
     is_ink = (alpha > 15) & (np.linalg.norm(rgb - bg_est, axis=2) > 40.0)
 
-    row_ink = np.sum(is_ink, axis=1)
-    bands: list[tuple[int, int, int]] = []  # (r0, r1_incl, ink_pixels)
-    in_band = False
-    b_start = 0
-    for r in range(h):
-        if row_ink[r] > 0 and not in_band:
-            in_band = True
-            b_start = r
-        elif row_ink[r] == 0 and in_band:
-            in_band = False
-            bands.append((b_start, r - 1, int(np.sum(row_ink[b_start:r]))))
-    if in_band:
-        bands.append((b_start, h - 1, int(np.sum(row_ink[b_start:h]))))
+    new_top, new_bottom = 0, h
+    new_left, new_right = 0, w
 
-    if len(bands) < 2:
-        return rgba, (0, 0, 0, 0)
-
-    main_band = max(bands, key=lambda b: b[2])
-    main_band_h = main_band[1] - main_band[0] + 1
-    max_sliver_h = max(8, int(round(h * 0.13)))
-    new_top = 0
-    new_bottom = h
-
-    # Check top-most sliver separated by >= 2 blank rows from next band
-    first = bands[0]
-    if first != main_band and first[0] <= 1:
-        sliver_h = first[1] - first[0] + 1
-        gap_after = bands[1][0] - first[1] - 1
+    # --- Step 1: Peel an open C-shaped grazed card border wrapping top+bottom+left (open on right!) ---
+    # Must run BEFORE band-stripping so any stray letter sliver on the right edge (e.g. grazed 'T') is stripped next!
+    if h >= 40 and w >= 40:
+        top_edge_dense = float(np.mean(is_ink[:4, :])) > 0.45
+        top_gap_clean = float(np.mean(is_ink[5:9, 6 : w - 4])) < 0.03
+        bot_edge_dense = float(np.mean(is_ink[h - 4 :, :])) > 0.45
+        bot_gap_clean = float(np.mean(is_ink[h - 9 : h - 5, 6 : w - 4])) < 0.03
+        left_edge_dense = float(np.mean(is_ink[:, :4])) > 0.45
+        left_gap_clean = float(np.mean(is_ink[6 : h - 6, 5:9])) < 0.03
+        # Crucial distinction: a C-shaped grazed card frame is OPEN on the right edge, whereas a framed
+        # mini-screen/thumbnail is CLOSED on all 4 sides! Never peel a closed 4-sided picture frame.
+        right_edge_open = float(np.mean(is_ink[6 : h - 6, w - 4 :])) < 0.20
         if (
-            sliver_h <= max_sliver_h
-            and sliver_h <= main_band_h * 0.25
-            and gap_after >= 2
-            and first[2] < main_band[2] * 0.25
+            top_edge_dense
+            and top_gap_clean
+            and bot_edge_dense
+            and bot_gap_clean
+            and left_edge_dense
+            and left_gap_clean
+            and right_edge_open
         ):
-            new_top = bands[1][0]
+            inner = is_ink[7 : h - 7, 7:w]
+            iys, ixs = np.where(inner)
+            if len(ixs) >= 24 and len(iys) >= 24:
+                ix0, ix1 = int(ixs.min()), int(ixs.max()) + 1
+                iy0, iy1 = int(iys.min()), int(iys.max()) + 1
+                new_left = 7 + ix0
+                new_right = 7 + ix1
+                new_top = 7 + iy0
+                new_bottom = 7 + iy1
 
-    # Check bottom-most sliver separated by >= 2 blank rows from previous band
-    last = bands[-1]
-    if last != main_band and last[1] >= h - 2:
-        sliver_h = last[1] - last[0] + 1
-        gap_before = last[0] - bands[-2][1] - 1
-        if (
-            sliver_h <= max_sliver_h
-            and sliver_h <= main_band_h * 0.25
-            and gap_before >= 2
-            and last[2] < main_band[2] * 0.25
-        ):
-            new_bottom = bands[-2][1] + 1
+    # --- Step 2: Strip disconnected top/bottom caption lines & left/right stray letter slivers ---
+    for _ in range(2):
+        sub_ink = is_ink[new_top:new_bottom, new_left:new_right]
+        sh, sw = sub_ink.shape
+        if sh < 28 or sw < 24:
+            break
+        row_ink = np.sum(sub_ink, axis=1)
+        rbands = _find_1d_bands(row_ink)
+        changed = False
+        if len(rbands) >= 2:
+            main_b = max(rbands, key=lambda b: b[2])
+            main_bh = main_b[1] - main_b[0] + 1
+            max_sliver_h = max(24, int(round(sh * 0.28)))
 
-    if new_top == 0 and new_bottom == h:
+            first = rbands[0]
+            if first != main_b and first[0] <= 2:
+                sliver_h = first[1] - first[0] + 1
+                gap_after = rbands[1][0] - first[1] - 1
+                if (
+                    sliver_h <= max_sliver_h
+                    and sliver_h <= main_bh * 0.38
+                    and gap_after >= 1
+                    and first[2] < main_b[2] * 0.42
+                ):
+                    new_top += rbands[1][0]
+                    changed = True
+
+            last = rbands[-1]
+            if not changed and last != main_b and last[1] >= sh - 3:
+                sliver_h = last[1] - last[0] + 1
+                gap_before = last[0] - rbands[-2][1] - 1
+                if (
+                    sliver_h <= max_sliver_h
+                    and sliver_h <= main_bh * 0.38
+                    and gap_before >= 1
+                    and last[2] < main_b[2] * 0.42
+                ):
+                    new_bottom -= (sh - (rbands[-2][1] + 1))
+                    changed = True
+
+        # Check vertical left/right stray letter or border slivers (e.g. grazed 'T' on right of doc icon)
+        sub_ink = is_ink[new_top:new_bottom, new_left:new_right]
+        sh, sw = sub_ink.shape
+        col_ink = np.sum(sub_ink, axis=0)
+        cbands = _find_1d_bands(col_ink)
+        if len(cbands) >= 2:
+            main_c = max(cbands, key=lambda b: b[2])
+            main_cw = main_c[1] - main_c[0] + 1
+            max_sliver_w = max(12, int(round(sw * 0.16)))
+
+            cfirst = cbands[0]
+            if cfirst != main_c and cfirst[0] <= 2:
+                sliver_w = cfirst[1] - cfirst[0] + 1
+                gap_after = cbands[1][0] - cfirst[1] - 1
+                if (
+                    sliver_w <= max_sliver_w
+                    and sliver_w <= main_cw * 0.25
+                    and gap_after >= 2
+                    and cfirst[2] < main_c[2] * 0.25
+                ):
+                    new_left += cbands[1][0]
+                    changed = True
+
+            clast = cbands[-1]
+            if clast != main_c and clast[1] >= sw - 3:
+                sliver_w = clast[1] - clast[0] + 1
+                gap_before = clast[0] - cbands[-2][1] - 1
+                if (
+                    sliver_w <= max_sliver_w
+                    and sliver_w <= main_cw * 0.25
+                    and gap_before >= 2
+                    and clast[2] < main_c[2] * 0.25
+                ):
+                    new_right -= (sw - (cbands[-2][1] + 1))
+                    changed = True
+
+        if not changed:
+            break
+
+    if (new_top, new_bottom, new_left, new_right) == (0, h, 0, w):
         return rgba, (0, 0, 0, 0)
-    if new_bottom - new_top < 16:
+    if (new_bottom - new_top) < 16 or (new_right - new_left) < 16:
         return rgba, (0, 0, 0, 0)
 
-    trimmed = rgba.crop((0, new_top, w, new_bottom))
-    return trimmed, (0, new_top, 0, h - new_bottom)
+    trimmed = rgba.crop((new_left, new_top, new_right, new_bottom))
+    return trimmed, (new_left, new_top, w - new_right, h - new_bottom)
+
+
+def snap_bbox_to_foreground(
+    draft_arr: np.ndarray,
+    px1: int,
+    py1: int,
+    px2: int,
+    py2: int,
+    *,
+    max_expand: int = 14,
+) -> tuple[int, int, int, int]:
+    """Zero-GPU pixel-level boundary snapper: if a VLM coarse crop edge slices across a graphic's
+    dark/colored foreground pixels, gently step outward (up to `max_expand` px) until hitting a clean
+    blank background column/row, stopping immediately before crossing any enclosing panel wall.
+    """
+    h, w, _ = draft_arr.shape
+    rx0 = max(0, px1 - max_expand)
+    ry0 = max(0, py1 - max_expand)
+    rx1 = min(w, px2 + max_expand)
+    ry1 = min(h, py2 + max_expand)
+    roi = draft_arr[ry0:ry1, rx0:rx1, :3]
+    if roi.size == 0:
+        return px1, py1, px2, py2
+
+    # Estimate local card/canvas backdrop from the brightest 25% pixels in local ROI
+    lum = 0.299 * roi[:, :, 0] + 0.587 * roi[:, :, 1] + 0.114 * roi[:, :, 2]
+    thr_lum = float(np.percentile(lum, 75))
+    bright_px = roi[lum >= thr_lum]
+    if len(bright_px) < 16:
+        return px1, py1, px2, py2
+    bg_color = np.median(bright_px, axis=0)
+
+    def _is_ink_line(slice_rgb: np.ndarray) -> float:
+        if slice_rgb.size == 0:
+            return 0.0
+        dists = np.linalg.norm(slice_rgb - bg_color, axis=-1)
+        return float(np.mean(dists > 36.0))
+
+    def _is_panel_wall_v(col_x: int, y0: int, y1: int) -> bool:
+        """True if vertical column `col_x` continues as a solid line far above AND below [y0, y1]."""
+        above = draft_arr[max(0, y0 - 12) : y0, col_x, :3]
+        below = draft_arr[y1 : min(h, y1 + 12), col_x, :3]
+        return above.shape[0] >= 4 and below.shape[0] >= 4 and _is_ink_line(above) > 0.75 and _is_ink_line(below) > 0.75
+
+    def _is_panel_wall_h(row_y: int, x0: int, x1: int) -> bool:
+        """True if horizontal row `row_y` continues as a solid line far left AND right of [x0, x1]."""
+        left = draft_arr[row_y, max(0, x0 - 12) : x0, :3]
+        right = draft_arr[row_y, x1 : min(w, x1 + 12), :3]
+        return left.shape[0] >= 4 and right.shape[0] >= 4 and _is_ink_line(left) > 0.75 and _is_ink_line(right) > 0.75
+
+    nx1, ny1, nx2, ny2 = px1, py1, px2, py2
+
+    # Expand LEFT if current left edge slices through graphic ink (stopping at blank bg or outer panel wall)
+    if _is_ink_line(draft_arr[ny1:ny2, nx1, :3]) > 0.06:
+        for _ in range(max_expand):
+            if nx1 <= 1 or _is_panel_wall_v(nx1 - 1, ny1, ny2):
+                break
+            if _is_ink_line(draft_arr[ny1:ny2, nx1 - 1, :3]) <= 0.02:
+                break
+            nx1 -= 1
+
+    # Expand RIGHT
+    if _is_ink_line(draft_arr[ny1:ny2, max(0, nx2 - 1), :3]) > 0.06:
+        for _ in range(max_expand):
+            if nx2 >= w - 1 or _is_panel_wall_v(nx2, ny1, ny2):
+                break
+            if _is_ink_line(draft_arr[ny1:ny2, nx2, :3]) <= 0.02:
+                break
+            nx2 += 1
+
+    # Expand TOP
+    if _is_ink_line(draft_arr[ny1, nx1:nx2, :3]) > 0.06:
+        for _ in range(max_expand):
+            if ny1 <= 1 or _is_panel_wall_h(ny1 - 1, nx1, nx2):
+                break
+            if _is_ink_line(draft_arr[ny1 - 1, nx1:nx2, :3]) <= 0.02:
+                break
+            ny1 -= 1
+
+    # Expand BOTTOM
+    if _is_ink_line(draft_arr[max(0, ny2 - 1), nx1:nx2, :3]) > 0.06:
+        for _ in range(max_expand):
+            if ny2 >= h - 1 or _is_panel_wall_h(ny2, nx1, nx2):
+                break
+            if _is_ink_line(draft_arr[ny2, nx1:nx2, :3]) <= 0.02:
+                break
+            ny2 += 1
+
+    return nx1, ny1, nx2, ny2
+
+
+def _trim_uniform_margin_opaque(crop_img: Image.Image, tolerance: float = 20.0) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """Trim redundant uniform white/card outer padding around a rectangular opaque crop."""
+    rgba = crop_img.convert("RGBA")
+    arr = np.asarray(rgba, dtype=np.float32)
+    h, w, _ = arr.shape
+    if h < 16 or w < 16:
+        return rgba, (0, 0, 0, 0)
+    rgb = arr[:, :, :3]
+    border_pixels = np.concatenate([rgb[0, :, :], rgb[h - 1, :, :], rgb[:, 0, :], rgb[:, w - 1, :]], axis=0)
+    bg_color = np.median(border_pixels, axis=0)
+    if float(np.mean(np.linalg.norm(border_pixels - bg_color, axis=1) < tolerance)) < 0.70:
+        return rgba, (0, 0, 0, 0)
+    fg = np.linalg.norm(rgb - bg_color, axis=2) > tolerance * 1.25
+    ys, xs = np.where(fg)
+    if len(xs) < 16 or len(ys) < 16:
+        return rgba, (0, 0, 0, 0)
+    tx0, tx1 = int(xs.min()), int(xs.max()) + 1
+    ty0, ty1 = int(ys.min()), int(ys.max()) + 1
+    if tx0 <= 1 and ty0 <= 1 and (w - tx1) <= 1 and (h - ty1) <= 1:
+        return rgba, (0, 0, 0, 0)
+    return rgba.crop((tx0, ty0, tx1, ty1)), (tx0, ty0, w - tx1, h - ty1)
 
 
 def _encode_pil_png_data_url(img: Image.Image) -> str:
@@ -331,17 +528,51 @@ def _encode_pil_png_data_url(img: Image.Image) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _deduplicate_overlapping_specs(raw_assets: list[dict[str, Any]], overlap_thresh: float = 0.72) -> list[dict[str, Any]]:
+    """Drop near-duplicate heavily overlapping asset specs (keeping the earlier/larger clean one)."""
+    kept: list[dict[str, Any]] = []
+    kept_boxes: list[tuple[float, float, float, float]] = []
+    for item in raw_assets:
+        bbox = item.get("bbox_1000")
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [float(v) for v in bbox]
+        except Exception:
+            continue
+        if x2 <= x1 + 4 or y2 <= y1 + 4:
+            continue
+        area = (x2 - x1) * (y2 - y1)
+        duplicate = False
+        for kx1, ky1, kx2, ky2 in kept_boxes:
+            ix1, iy1 = max(x1, kx1), max(y1, ky1)
+            ix2, iy2 = min(x2, kx2), min(y2, ky2)
+            if ix2 > ix1 and iy2 > iy1:
+                inter = (ix2 - ix1) * (iy2 - iy1)
+                karea = (kx2 - kx1) * (ky2 - ky1)
+                if inter / max(1.0, min(area, karea)) >= overlap_thresh:
+                    duplicate = True
+                    break
+        if not duplicate:
+            kept.append(item)
+            kept_boxes.append((x1, y1, x2, y2))
+    return kept
+
+
 def _crop_assets_from_specs(
     raw_assets: list[dict[str, Any]],
     draft_rgb: Image.Image,
     assets_dir: Path,
     viewbox: tuple[int, int],
     *,
-    max_assets: int = 8,
+    max_assets: int = 28,
 ) -> list[ExtractedAsset]:
-    """Crop and package visual assets from normalized 0..1000 bbox specifications."""
+    """Crop and package visual assets from normalized 0..1000 bbox specifications with
+    zero-GPU pixel-boundary snapping, edge flood-fill background removal, and text-bleed stripping.
+    """
     dw, dh = draft_rgb.size
     vb_w, vb_h = viewbox
+    draft_arr = np.asarray(draft_rgb, dtype=np.float32)
 
     # Clean stale crops before writing the latest pass
     for old_png in assets_dir.glob("*.png"):
@@ -350,10 +581,10 @@ def _crop_assets_from_specs(
         except Exception:
             pass
 
+    deduped = _deduplicate_overlapping_specs(raw_assets)[:max_assets]
     extracted: list[ExtractedAsset] = []
-    used_ids: set[str] = set()
 
-    for idx, item in enumerate(raw_assets[:max_assets], 1):
+    for idx, item in enumerate(deduped, 1):
         bbox = item.get("bbox_1000")
         if not isinstance(bbox, list) or len(bbox) != 4:
             continue
@@ -364,8 +595,8 @@ def _crop_assets_from_specs(
 
         x1_n = max(0, min(999, x1_n))
         y1_n = max(0, min(999, y1_n))
-        x2_n = max(x1_n + 10, min(1000, x2_n))
-        y2_n = max(y1_n + 10, min(1000, y2_n))
+        x2_n = max(x1_n + 8, min(1000, x2_n))
+        y2_n = max(y1_n + 8, min(1000, y2_n))
 
         # Reject accidental whole-figure crops (> 55% of width & height)
         if (x2_n - x1_n) > 550 and (y2_n - y1_n) > 550:
@@ -375,28 +606,31 @@ def _crop_assets_from_specs(
         py1 = int(round(dh * y1_n / 1000.0))
         px2 = int(round(dw * x2_n / 1000.0))
         py2 = int(round(dh * y2_n / 1000.0))
-        if (px2 - px1) < 20 or (py2 - py1) < 20:
+        if (px2 - px1) < 16 or (py2 - py1) < 16:
             continue
 
-        slug = re.sub(r"[^a-z0-9_]+", "_", str(item.get("asset_id") or f"asset_{idx}").lower()).strip("_")
-        if not slug:
-            slug = f"asset_{idx}"
-        while slug in used_ids:
-            slug = f"{slug}_{idx}"
-        used_ids.add(slug)
+        # Zero-GPU pixel-boundary snap: recover any sliced border pixels cleanly
+        px1, py1, px2, py2 = snap_bbox_to_foreground(draft_arr, px1, py1, px2, py2, max_expand=12)
+
+        # Canonical AutoFigure-Edit style ID (AF01, AF02, ...) for unmistakable 1-to-1 mask matching
+        slug = f"AF{len(extracted) + 1:02d}"
 
         bg_mode = "remove_bg" if str(item.get("bg_mode", "")).strip().lower() == "remove_bg" else "opaque_rect"
-        rounded_rx = int(item.get("rounded_rx") or (6 if bg_mode == "opaque_rect" else 0))
+        rounded_rx = int(item.get("rounded_rx") or (4 if bg_mode == "opaque_rect" else 0))
 
         crop = draft_rgb.crop((px1, py1, px2, py2))
         if bg_mode == "remove_bg":
-            final_crop, (tl, tt, tr, tb) = smart_remove_border_background(crop)
+            final_crop, (tl, tt, tr, tb) = smart_remove_border_background(crop, tolerance=20.0)
             px1 += tl
             py1 += tt
             px2 -= tr
             py2 -= tb
         else:
-            final_crop = crop.convert("RGBA")
+            final_crop, (tl, tt, tr, tb) = _trim_uniform_margin_opaque(crop)
+            px1 += tl
+            py1 += tt
+            px2 -= tr
+            py2 -= tb
 
         # Deterministically strip any tiny grazed caption/header text slivers separated by blank gap
         final_crop, (btl, btt, btr, btb) = strip_edge_text_bleed(final_crop)
@@ -405,7 +639,7 @@ def _crop_assets_from_specs(
         px2 -= btr
         py2 -= btb
 
-        if px2 <= px1 or py2 <= py1:
+        if (px2 - px1) < 12 or (py2 - py1) < 12:
             continue
 
         crop_file = assets_dir / f"{slug}.png"
@@ -487,11 +721,12 @@ def _verify_and_calibrate_asset_boxes(
     verify_path: Path,
     extracted: list[ExtractedAsset],
     *,
-    max_assets: int = 8,
+    max_assets: int = 28,
 ) -> tuple[bool, list[dict[str, Any]]]:
-    """Perform a 1-pass visual alignment inspection on proposed crop boxes.
+    """Perform a 1-pass visual alignment & completeness audit on proposed crop boxes.
 
-    Catches vertical/horizontal shifts and clipped adjacent text headers BEFORE Stage 5 runs.
+    1. Catches any MISSED icons/graphics (so Stage 5 NEVER has to hand-draw ugly SVG doodles!)
+    2. Catches any clipped adjacent text headers/captions or misaligned borders BEFORE Stage 5 runs.
     """
     current_specs = [
         {
@@ -505,35 +740,36 @@ def _verify_and_calibrate_asset_boxes(
         for idx, a in enumerate(extracted, 1)
     ]
 
-    prompt = f"""You are performing a **Precision Crop Box Alignment Audit** before Hybrid SVG assembly.
+    prompt = f"""You are performing a **Full-Coverage Icon & Crop Box Alignment Audit** (AutoFigure-Edit standard) before Hybrid SVG assembly.
 
 Look carefully at ALL THREE attached images (ALL THREE share the EXACT same pixel dimensions, `0..1000` edge-to-edge, ZERO outer margins!):
 - **Image 1**: Clean `stage1_draft.png`
 - **Image 2**: `stage1_draft_ruler.png` (exact edge-to-edge `0..1000` red/blue grid)
 - **Image 3**: `stage1_draft_verify.png` (the current proposed crop boxes drawn as translucent RED rectangles with compact `#1`, `#2`, ... corner badges!)
 
-CURRENT PROPOSED BOXES:
+CURRENT PROPOSED BOXES ({len(current_specs)} items):
 ```json
 {json.dumps(current_specs, ensure_ascii=False, indent=2)}
 ```
 
-INSPECT EVERY SINGLE RED RECTANGLE IN IMAGE 3 STRICTLY:
-1. **TEXT CLIPPING CHECK (CRITICAL!)**: Does ANY red rectangle touch, graze, or cover even 2 pixels of ANY text title, card header, axis label, or caption directly above or below? If YES, tighten `y1`/`y2`/`x1`/`x2` by 5–15 units using Image 2's grid so ZERO text letters remain inside the red box!
-2. **EDGE ALIGNMENT CHECK**: Does ANY red rectangle cut off the left/right/top/bottom border of a stacked card, spectrogram, or illustration, or include excess blank margin? If YES, snap `bbox_1000` tightly around the exact artwork bounds!
-3. **DROP NON-ARTWORK**: If a red rectangle accidentally covers mostly plain text pills, plain boxes, or simple arrows that should be pure vector SVG instead of a raster crop, REMOVE that item from `assets`!
-4. If ALL red rectangles are already tight, well-centered around pure visual artwork, and clip ZERO text, set `"needs_adjustment": false` and keep them unchanged.
+AUDIT IMAGE 3 STRICTLY AGAINST IMAGE 1 & IMAGE 2:
+1. **MISSED VISUAL GRAPHICS CHECK (VERY IMPORTANT!)**: Scan EVERY panel left-to-right, top-to-bottom. Is there ANY visible non-text visual graphic NOT covered by a red box yet — such as a VLM/Critic emblem, neural network graph, waveform trace, device/monitor/laptop/probe, document icon, mini-workflow DAG, table/matrix graphic, skill-bar diagram, tool-strip graphic, stacked metric/waveform cards, or framed mini-screen thumbnail?! If ANY graphic was missed, **ADD IT** to `assets` with exact `bbox_1000` (so Stage 5 NEVER hand-draws ugly SVG icons)!
+2. **ZERO TEXT CLIPPING CHECK**: Does ANY red rectangle touch, graze, or cover ANY text title, card header, pill text, legend text, or caption directly above, below, or beside it? If YES, tighten `bbox_1000` using Image 2's grid so ZERO text letters remain inside!
+3. **TIGHT EDGE ALIGNMENT**: Does ANY red rectangle cut off part of an icon/graphic or include excess blank space? Snap `bbox_1000` tightly around the exact graphic!
+4. **DROP PLAIN BOXES / ARROWS**: Remove any red box that accidentally covered a plain text pill, outer pastel panel, or simple connector arrow.
+5. If ALL graphics are already covered cleanly with zero text clipping and tight alignment, set `"needs_adjustment": false`.
 
-Return ONLY valid JSON (no markdown fences):
+Return ONLY valid JSON (no markdown fences, up to {max_assets} assets):
 {{
   "needs_adjustment": true,
-  "audit_notes": ["brief note on what was fixed or why all boxes are clean"],
+  "audit_notes": ["brief note on added/adjusted boxes"],
   "assets": [
     {{
-      "asset_id": "short_snake_case_id",
+      "asset_id": "AF01",
       "description": "brief description",
       "bbox_1000": [x1, y1, x2, y2],
       "bg_mode": "opaque_rect | remove_bg",
-      "rounded_rx": 6
+      "rounded_rx": 4
     }}
   ]
 }}
@@ -542,7 +778,7 @@ Return ONLY valid JSON (no markdown fences):
     # Cap auxiliary mask-alignment audit at 'high' when global effort is 'xhigh' to keep turnaround crisp
     cur_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "")
     audit_effort = "high" if str(cur_eff).strip().lower() == "xhigh" else None
-    mm_kwargs: dict[str, Any] = {"max_output_tokens": 6000, "temperature": 0.1}
+    mm_kwargs: dict[str, Any] = {"max_output_tokens": 8000, "temperature": 0.1}
     if audit_effort:
         mm_kwargs["reasoning_effort"] = audit_effort
 
@@ -574,12 +810,12 @@ def detect_and_crop_visual_assets(
     output_dir: Path,
     viewbox: tuple[int, int],
     *,
-    max_assets: int = 8,
+    max_assets: int = 28,
     verify_masks: bool = True,
 ) -> list[ExtractedAsset]:
-    """Detect rich visual assets in stage1_draft.png using the multimodal model + zero-margin
-    coordinate ruler, verify alignment via a translucent see-through mask overlay, and crop them
-    losslessly at full resolution for hybrid editable SVG assembly.
+    """Detect EVERY non-text visual graphic/icon in stage1_draft.png (AutoFigure-Edit full-coverage
+    paradigm without GPU/SAM3), snap boundaries pixel-accurately with pure NumPy, verify coverage &
+    alignment via a translucent overlay, and crop losslessly at full native resolution.
     """
     assets_dir = output_dir / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -590,39 +826,43 @@ def detect_and_crop_visual_assets(
         draft_rgb = d_img.convert("RGB")
         dw, dh = draft_rgb.size
 
-    prompt = f"""You are a Precision Visual Asset Segmenter converting a scientific overview figure into a **Hybrid Editable SVG** (like AutoFigure-Edit).
+    prompt = f"""You are a Precision Visual Asset Segmenter converting a high-craft academic figure into an **AutoFigure-Edit Style Hybrid Editable SVG**.
 
 Look at BOTH attached images:
 - **Image 1**: Clean `stage1_draft.png` ({dw} x {dh} px).
 - **Image 2**: `stage1_draft_ruler.png` — the **EXACT SAME {dw} x {dh} px image** (ZERO outer white margin!) overlaid directly with an **edge-to-edge normalized 0..1000 coordinate grid** (red major lines every 100 units with red tick badges on all 4 edges; blue minor lines every 50 units).
   **DIRECT 1:1 COORDINATE RULE**: `0` is the exact left/top edge of the image and `1000` is the exact right/bottom edge of the image. Read `[x1, y1, x2, y2]` directly from the red/blue grid lines — DO NOT add or subtract any margin offset!
 
-YOUR JOB:
-Locate ONLY the genuinely rich visual artwork regions inside the figure that should be cropped losslessly from Image 1 and embedded as draggable `<image>` elements inside the editable SVG — **specifically**:
-- Realistic photos or image samples (e.g., human faces, natural photos, medical scans, stone/marble slabs, satellite/scene crops, real screen reconstructions)
-- 3D/isometric rendered objects (e.g., 3D meshes, voxels, optical setups, molecules, shaded geometric volumes, layered 3D tensors)
-- Tactile material textures, spatial fields, real spectrograms/waterfalls/heatmaps/dense plots
-- Complex multi-part physical equipment illustrations or expressive bespoke icons that cannot be drawn cleanly as simple SVG primitives
+CORE DESIGN PRINCIPLE (WHY THIS MATTERS FOR BEAUTY!):
+An SVG code generator excels at crisp rectangular panels, white inset cards, dashed borders, text pills, geometric arrows, and editable `<text>`, **but produces UGLY amateur doodles whenever forced to hand-draw icons, logos, neural networks, waveforms, devices, DAGs, or mini-screens!**
+Therefore, your job is to **LOCATE EVERY SINGLE NON-TEXT VISUAL GRAPHIC / ICON** in Image 1 (typically **10 to 25 items** on a rich diagram!) so ALL of them are cropped losslessly at native HD resolution and embedded cleanly as draggable `<image>` assets!
 
-CRITICAL EXCLUSION RULES (DO NOT CROP THESE!):
-1. **ZERO TEXT INSIDE CROPS (STRICT!)**: NEVER include ANY title, card header, sub-label, caption, or equation inside `bbox_1000`! Always start `y1` strictly BELOW any title/header above the graphic and end `y2` strictly ABOVE any caption below the graphic so 100% of text stays crisp native vector `<text>`!
-2. **NEVER crop an entire module box, pastel panel, or text pill!** Only crop the pure graphic artwork inside.
-3. **NEVER crop simple flat geometric vectors** (plain arrows, plain rectangles, simple 3-layer circle node-link graphs, simple 1-color lines/dots) — those render sharper as native SVG vectors!
-4. If the figure is purely geometric vectors with no complex raster/photo/spectrogram/3D artwork worth cropping, return `{{"assets": []}}`.
+MUST CROP ALL OF THESE VISUAL GRAPHICS (SCAN EVERY SINGLE PANEL SYSTEMATICALLY!):
+- **Hardware / Device / Scene Illustrations** (monitors, laptops, cables, antennas/probes, sensors, robots, microscopes, 3D objects, faces, natural photos)
+- **Icons & Geometric Emblems** (VLM/LLM swirl or rosette logos, Critic icons, document/page icons, lock/gear/flame/code symbols)
+- **Waveforms, Signals, Spectrograms & Plots** (multi-frequency modulated RF waveforms, grayscale spectrograms, heatmaps, stacked waveform/signal cards, mini-charts)
+- **Neural Networks & Structured Micro-Diagrams** (black or colored node-link neural networks, compact workflow DAGs on grids, shaded table/matrix icons, multi-row colored skill-bar graphics, driver/tool badge strips)
+- **Framed Preview Thumbnails** (mini screen/output preview cards like `Initial Output`, `Refined Output`, `Verified Output` inner visual graphic)
+
+STRICT EXCLUSION RULES (DO NOT INCLUDE THESE INSIDE ANY CROP BBOX!):
+1. **ZERO EDITABLE TEXT INSIDE CROPS**: NEVER include section titles, card headers, pill text, legend labels, or captions (`Target DUT`, `SDR Probe`, `f1/f2/f3`, `VLM`, `Recovery Network`, `SSIM / WER / TVLA`, `Verified Output`, etc.) inside any `bbox_1000`! Start `y1` strictly BELOW headers and end `y2` strictly ABOVE captions so 100% of text remains crisp native vector `<text>`!
+2. **NEVER crop outer pastel/tinted panels, white card backgrounds, dashed border frames, or colored text pills** — those are rebuilt cleanly as native vector `<rect>`!
+3. **NEVER crop inter-panel block arrows or simple straight connector arrows** — those are rebuilt cleanly as native vector arrows!
+4. **NO DUPLICATE OVERLAPPING BOXES**: Each graphic gets ONE clean non-overlapping tight bbox. (If a monitor + laptop + cable + waves + probe form one tightly coupled hardware scene, crop the clean graphic parts cleanly without covering `Target DUT` above or `SDR Probe` below.)
 
 For each asset, choose `bg_mode`:
-- `"opaque_rect"`: for rectangular framed photos, spectrograms, heatmaps, or screen thumbnails.
-- `"remove_bg"`: for irregular/floating illustrations, 3D objects, or equipment icons sitting on a uniform white or pale tinted card background.
+- `"opaque_rect"`: for crisp rectangular framed spectrograms, photos, heatmaps, framed mini-screens, or shaded tables that fill a rectangle cleanly.
+- `"remove_bg"`: for floating icons, emblems (`VLM`, `Critic`), neural networks, waveforms, device illustrations, DAGs, document icons, or stacked cards sitting on a white or light tinted card background (transparent background removal will preserve their crisp lines cleanly!).
 
-Return ONLY valid JSON (no markdown fences) with at most {max_assets} assets:
+Return ONLY valid JSON (no markdown fences) with up to {max_assets} assets, ordered cleanly top-to-bottom, left-to-right:
 {{
   "assets": [
     {{
-      "asset_id": "short_snake_case_id",
+      "asset_id": "AF01",
       "description": "brief description of the graphic",
       "bbox_1000": [x1, y1, x2, y2],
       "bg_mode": "opaque_rect | remove_bg",
-      "rounded_rx": 6
+      "rounded_rx": 4
     }}
   ]
 }}
@@ -636,7 +876,7 @@ Return ONLY valid JSON (no markdown fences) with at most {max_assets} assets:
             "Image 2 — Edge-to-Edge 0..1000 Coordinate Ruler Overlay (Identical Dimensions, Zero Margin):",
             ruler_path,
         ],
-        max_output_tokens=8000,
+        max_output_tokens=10000,
         temperature=0.1,
     )
 
@@ -678,8 +918,8 @@ def render_masked_draft_preview(
     viewbox: tuple[int, int],
     out_path: Path,
 ) -> Path:
-    """Create an AutoFigure-Edit style `samed.png` mask overlay showing exact cropped asset boxes
-    so Stage 5 SVG reconstruction NEVER double-draws cartoon shapes or collides text over embedded assets.
+    """Create an authentic AutoFigure-Edit `samed.png` mask overlay: solid `#808080` grey rectangle
+    with crisp `#000000` outline and centered white `AF01`, `AF02`, ... label fitting inside each box.
     """
     with Image.open(draft_path) as base_img:
         rgba = base_img.convert("RGBA")
@@ -687,7 +927,6 @@ def render_masked_draft_preview(
 
     overlay = Image.new("RGBA", (dw, dh), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    font = _load_ui_font(16, bold=True)
 
     vb_w, vb_h = viewbox
     for idx, a in enumerate(assets, 1):
@@ -695,17 +934,20 @@ def render_masked_draft_preview(
         y1 = int(round((a.svg_y / float(vb_h)) * dh))
         x2 = int(round(((a.svg_x + a.svg_w) / float(vb_w)) * dw))
         y2 = int(round(((a.svg_y + a.svg_h) / float(vb_h)) * dh))
-        draw.rectangle([x1, y1, x2, y2], fill=(128, 128, 128, 215), outline=(15, 23, 42, 255), width=2)
+        draw.rectangle([x1, y1, x2, y2], fill=(128, 128, 128, 240), outline=(0, 0, 0, 255), width=2)
         box_w = max(1, x2 - x1)
-        tag = f"ASSET:{a.asset_id}"
+        box_h = max(1, y2 - y1)
+        tag = a.asset_id if len(a.asset_id) <= 6 else f"AF{idx:02d}"
+        fsize = max(10, min(20, int(min(box_w * 0.28, box_h * 0.36))))
+        font = _load_ui_font(fsize, bold=True)
         bbox = draw.textbbox((0, 0), tag, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        if tw > box_w - 8:
-            tag = f"#{idx}"
+        if tw > box_w - 4:
+            font = _load_ui_font(max(9, int(fsize * (box_w - 4) / max(1, tw))), bold=True)
             bbox = draw.textbbox((0, 0), tag, font=font)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-        draw.text((max(x1 + 3, cx - tw // 2), max(y1 + 2, cy - th // 2)), tag, fill=(255, 255, 255, 255), font=font)
+        draw.text((cx - tw // 2 - bbox[0], cy - th // 2 - bbox[1]), tag, fill=(255, 255, 255, 255), font=font)
 
     merged = Image.alpha_composite(rgba, overlay).convert("RGB")
     out_path.parent.mkdir(parents=True, exist_ok=True)

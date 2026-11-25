@@ -6,7 +6,7 @@ authors:
   - alias: "WYH302"
 repository-code: "https://github.com/WYH302/Paper2SVG-ultra"
 license: MIT
-version: "1.1.0"
+version: "1.2.0"
 date-released: "2026-11-25"
 keywords:
   - academic-figures

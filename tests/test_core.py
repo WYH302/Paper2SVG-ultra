@@ -21,12 +21,14 @@ from paper2svg.asset_extractor import (
     inject_missing_assets,
     render_coordinate_ruler_overlay,
     smart_remove_border_background,
+    snap_bbox_to_foreground,
     strip_edge_text_bleed,
     verify_assets_preserved,
     _encode_pil_png_data_url,
 )
 from paper2svg.client import ResponsesAPIClient
 from paper2svg.config import Settings, load_settings, resolve_density_mode, sanitize_font_family
+from paper2svg.draft_generator import compute_svg_viewbox
 from paper2svg.pdf_parser import extract_pdf_sections
 from paper2svg.style_extractor import discover_reference_images, extract_style_dna
 from paper2svg.svg_critic import check_critic_content_retention
@@ -238,6 +240,42 @@ def test_strip_edge_text_bleed_preserves_graphic_and_removes_caption_sliver() ->
     wf_img = Image.fromarray(wf, mode="RGB")
     wf_out, wf_trims = strip_edge_text_bleed(wf_img)
     assert wf_trims == (0, 0, 0, 0) and wf_out.size == wf_img.size
+
+    # Verify a closed 4-sided picture frame (e.g. mini-screen thumbnail) is NOT peeled, while an open
+    # C-shaped grazed card border (left+top+bottom open on right) IS peeled cleanly!
+    closed_frame = np.full((64, 84, 3), 255, dtype=np.uint8)
+    closed_frame[:3, :] = 20
+    closed_frame[-3:, :] = 20
+    closed_frame[:, :3] = 20
+    closed_frame[:, -3:] = 20
+    closed_frame[14:50, 16:68] = 80
+    cf_out, cf_trims = strip_edge_text_bleed(Image.fromarray(closed_frame, mode="RGB"))
+    assert cf_trims == (0, 0, 0, 0) and cf_out.size == (84, 64)
+
+    open_c = np.full((74, 77, 3), 255, dtype=np.uint8)
+    open_c[:3, :] = 20
+    open_c[-3:, :] = 20
+    open_c[:, :3] = 20
+    open_c[14:60, 18:56] = 30    # inner doc icon
+    open_c[28:32, 72:77] = 20    # stray 'T' sliver on right edge
+    oc_out, oc_trims = strip_edge_text_bleed(Image.fromarray(open_c, mode="RGB"))
+    assert oc_trims[0] >= 12 and oc_trims[2] >= 10, f"Expected open C-frame + right sliver stripped, got {oc_trims}"
+    assert oc_out.width <= 45 and oc_out.height <= 50
+
+
+def test_pixel_snapper_and_native_1to1_viewbox() -> None:
+    # Build a 200x120 white canvas with a dark graphic rectangle at x=40..150, y=25..95
+    arr = np.full((120, 200, 3), 255, dtype=np.float32)
+    arr[25:95, 40:150] = [40, 40, 40]
+    arr[30:90, 45:145] = [140, 140, 140]
+    # Simulate a slightly too-tight VLM bbox that sliced 6px off the left & 5px off the bottom
+    nx1, ny1, nx2, ny2 = snap_bbox_to_foreground(arr, 46, 25, 150, 90, max_expand=12)
+    assert nx1 <= 41, f"Expected left edge snapped back to <=41, got {nx1}"
+    assert ny2 >= 94, f"Expected bottom edge snapped out to >=94, got {ny2}"
+
+    # Verify compute_svg_viewbox preserves exact 1:1 native pixel dimensions
+    img = Image.new("RGB", (2016, 756), (255, 255, 255))
+    assert compute_svg_viewbox(img, get_archetype("framework")) == (2016, 756)
 
 
 def test_adaptive_density_oob_and_critic_retention_guard() -> None:

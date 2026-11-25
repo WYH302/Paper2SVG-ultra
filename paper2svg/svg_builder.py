@@ -118,39 +118,27 @@ def build_editable_svg(
 
     pt_scale = TWO_COLUMN_WIDTH_PT / float(w)
     if resolved_density == "detailed":
-        # Calibrated for dense multi-panel IEEE S&P / USENIX / OSDI system diagrams (~35-70 labels)
-        px_title = int(round(7.6 / pt_scale))
-        px_panel = int(round(6.8 / pt_scale))
-        px_module = int(round(5.3 / pt_scale))
-        px_sub = int(round(4.6 / pt_scale))
+        # Calibrated to exact 1:1 native pixel canvas (e.g. 2016x756 -> pt_scale=0.25)
+        px_title = int(round(8.2 / pt_scale))
+        px_panel = int(round(7.4 / pt_scale))
+        px_module = int(round(5.8 / pt_scale))
+        px_sub = int(round(5.0 / pt_scale))
         px_floor = int(round(4.3 / pt_scale))
-        box_pad_px = 10
-        density_note = (
-            f"DENSE SYSTEMS ARCHITECTURE TIER (`detailed`, {len(inventory)} inventory labels): "
-            f"Use crisp, compact academic typography (`{px_panel}px` panel titles, `{px_module}px` card headers, "
-            f"`{px_sub}px` pill/module labels, `{px_floor}px` legend/arrow tags) and verify EVERY capsule width "
-            f"satisfies `width >= len(longest_line) * font_size * 0.62 + 16` so ZERO letters ever overflow a box!"
-        )
+        box_pad_px = max(10, int(round(w * 0.006)))
     else:
-        # Calibrated for airy CVPR / NeurIPS / Nature overview strips (<= 30 labels)
         px_title = int(round(10.5 / pt_scale))
         px_panel = int(round(9.5 / pt_scale))
         px_module = int(round(8.2 / pt_scale))
         px_sub = int(round(6.8 / pt_scale))
         px_floor = int(round(6.4 / pt_scale))
-        box_pad_px = 14
-        density_note = (
-            f"AIRY OVERVIEW TIER (`concise`, {len(inventory)} inventory labels): "
-            f"Use large, bold, effortless two-column typography (`{px_panel}px` panel titles, "
-            f"`{px_module}px` module titles, `{px_sub}px` sub-labels, floor `{px_floor}px`) with generous whitespace."
-        )
+        box_pad_px = max(14, int(round(w * 0.009)))
 
     assets: list[ExtractedAsset] = []
     if svg_mode == "hybrid_rich":
         if cached_assets is not None:
             assets = cached_assets
         else:
-            assets = detect_and_crop_visual_assets(client, draft_path, output_dir, viewbox)
+            assets = detect_and_crop_visual_assets(client, draft_path, output_dir, viewbox, max_assets=28)
 
     pal = style_dna.get("palette", {})
     cont = style_dna.get("container_philosophy", {})
@@ -158,102 +146,92 @@ def build_editable_svg(
 
     if assets:
         asset_manifest_json = json.dumps([a.to_prompt_dict() for a in assets], ensure_ascii=False, indent=2)
-        asset_instructions = f"""=== HYBRID EDITABLE VISUAL ASSETS (MUST PLACE ALL OF THESE!) ===
-We have already cropped {len(assets)} crisp high-resolution visual assets directly from `stage1_draft.png`
-(photos, 3D visuals, material textures, rich illustrations/plots).
-**DO NOT crudely redraw these objects with simple cartoon polygons!**
-Instead, place EVERY SINGLE asset cleanly inside `<g id="layer-visual-assets">` using its exact `href_placeholder`:
+        asset_instructions = f"""=== EXACT EMBEDDED VISUAL ASSETS ({len(assets)} HD GRAPHICS — ZERO HAND-DRAWN ICONS!) ===
+Image 2 (`stage1_draft_masked.png`) covers EVERY non-text visual graphic (`AF01`, `AF02`, ..., `AF{len(assets):02d}`) with a grey `#808080` rectangle.
+We ALREADY cropped all {len(assets)} graphics losslessly at native `{w}x{h}` resolution with transparent backgrounds!
+- **STRICT RULE**: **NEVER hand-draw ANY icon, emblem, waveform, neural network, DAG, hardware device, spectrogram, matrix, or mini-screen with `<path>`!**
+- Instead, place EVERY SINGLE asset verbatim inside `<g id="layer-visual-assets">` at its EXACT `(x, y, width, height)` from the manifest below:
 ```xml
-<g id="asset-<asset_id>">
-  <image x="..." y="..." width="..." height="..." href="__ASSET_<asset_id>__" preserveAspectRatio="xMidYMid meet"/>
+<g id="asset-AF01">
+  <image x="..." y="..." width="..." height="..." href="__ASSET_AF01__" preserveAspectRatio="xMidYMid meet"/>
 </g>
 ```
-- For assets with `rounded_rx > 0` (`opaque_rect` photos/crops), define a crisp `<clipPath id="clip-<asset_id>"><rect x="..." y="..." width="..." height="..." rx="..."/></clipPath>` in `<defs>` and apply `clip-path="url(#clip-<asset_id>)"` to the `<image>`!
-- You may fine-tune `(x, y, width, height)` slightly by a few pixels so each asset sits harmoniously centered inside its card/section with ZERO text overlap.
-- EVERY asset in the JSON list below MUST appear verbatim via its `href_placeholder` string (`__ASSET_...__`)!
+- Only add a `<clipPath>` for `"bg_mode": "opaque_rect"` items when `rounded_rx > 0`.
+- Keep the exact `(x, y, width, height)` from the manifest (these are ALREADY 1:1 native pixels aligned to Image 1!).
+- EVERY SINGLE `href_placeholder` (`__ASSET_AF01__` .. `__ASSET_AF{len(assets):02d}__`) MUST appear verbatim in your SVG!
 
-ASSET PLACEMENT MANIFEST:
+ASSET PLACEMENT MANIFEST (1:1 NATIVE PIXEL COORDINATES):
 ```json
 {asset_manifest_json}
 ```"""
     else:
         asset_instructions = (
-            "No cropped raster assets were required for this diagram — render all visual motifs cleanly using refined SVG primitives "
-            "and cohesive gradients/filters matching `stage1_draft.png`."
+            "No cropped raster assets were extracted — render all visual motifs cleanly matching `stage1_draft.png`."
         )
 
-    prompt = f"""You are a Master Scientific SVG Engineer & Editorial Graphic Designer (SIGGRAPH / CVPR / NeurIPS / Nature).
+    prompt = f"""You are a Master Scientific SVG Engineer performing **AutoFigure-Edit Style 1:1 Pixel-Exact SVG Reconstruction** of a publication-grade academic figure.
 
-YOUR TASK:
-Inspect the attached **Stage-1 visual composition (`stage1_draft.png`)** and reconstruct it faithfully as a **stunning, publication-grade EDITABLE SVG** (`viewBox="0 0 {w} {h}"`).
+YOUR SINGLE GOAL — **1:1 PIXEL-LEVEL VISUAL FIDELITY TO IMAGE 1 (`stage1_draft.png`)**:
+Replicate Image 1 (`stage1_draft.png`, exact dimensions `{w} x {h}` px) so faithfully that when rendered, our editable SVG looks **VIRTUALLY IDENTICAL IN BEAUTY, PROPORTION, BOLDNESS, COLOR, AND CRAFTSMANSHIP** to Image 1 — with EVERY icon/illustration preserved via the crisp embedded `<image href="__ASSET_AF..__"/>` assets, and EVERY panel, white inset card, dashed frame, text pill, arrow, and text label rebuilt as razor-sharp native editable SVG!
 
-CRITICAL DUAL FIDELITY MANDATE:
-1. **PRESERVE THE ARTISTRY OF `stage1_draft.png` — DO NOT DOWNGRADE INTO A DRY FLOWCHART!**
-   - Faithfully match the visual aesthetic of `stage1_draft.png`: its exact colors, borderless pills / soft tinted zones / colored header bars / subtle shadows (`container_philosophy`: `{cont.get('style')}`), its arrow style (`arrow_craft`: `{arr.get('style')}` — wide colored block arrows, smooth curves, or clean connectors), and its open breathing room!
-   - NEVER add ugly heavy dark wireframe borders around elements that are open or borderless in `stage1_draft.png`!
-2. **100% AUTHORITATIVE TEXT ACCURACY**:
-   - Every single word, symbol, and formula MUST be pure editable `<text>` (never baked into images) and MUST follow `[EXACT TEXT INVENTORY]` strictly — fixing any tiny typo or garbled glyph present in `stage1_draft.png`!
+1. **EXACT 1:1 NATIVE PIXEL COORDINATE SYSTEM (DO NOT RESCALE!)**:
+   - Root tag MUST be:
+     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`
+   - First child: `<rect x="0" y="0" width="{w}" height="{h}" fill="{pal.get('canvas_bg', '#FFFFFF')}"/>`
+   - Keep EVERY element strictly inside `[10, {w - 10}] x [10, {h - 10}]`.
+
+2. **EXACT CONTAINER, COLOR & BORDER REPLICATION**:
+   - Match Image 1's EXACT panel bounding boxes, row alignment (identical top/bottom Y across panels in the same row!), white gutters, corner radii, flat solid fill hexes (NO unsolicited muddy gradients or drop shadows if Image 1 is crisp flat 2D!), crisp border stroke widths (e.g. `3px`–`3.5px` on `{w}x{h}`), pure `#FFFFFF` inset cards, dashed focus frames (`stroke-dasharray`), and soft tinted text pills!
+
+3. **EXACT ARROW CRAFT, BOLDNESS & DIRECTION (DO NOT MISS, SHRINK, OR INVERT ANY ARROW!)**:
+   - Inspect Image 1 carefully and replicate **EVERY SINGLE ARROW** (both chunky inter-panel block arrows AND every short black intra-panel connector arrow!).
+   - Match Image 1's EXACT arrow thickness, broad symmetric triangular heads, fill color (e.g., chunky `#FFFFFF` block arrows with crisp `#171717` outlines; chunky `#9DBBE5` blue combine arrows), and clean centering inside gutters.
+   - **PER-ARROW DIRECTION CHECK (MANDATORY!)**: NEVER copy-paste an upward vertical arrow polygon for a downward connector (or vice versa)! Check EVERY inter-panel arrow individually against Image 1 AND `[FLOW CONNECTIONS]`: verify its arrowhead tip (`y_tip < y_base` for **UP**, `y_tip > y_base` for **DOWN**, `x_tip < x_base` for **LEFT**, `x_tip > x_base` for **RIGHT**) matches BOTH Image 1 and `[FLOW CONNECTIONS]` 100%!
+
+4. **BOLD, HIGH-CONTRAST ACADEMIC TYPOGRAPHY MATCHING IMAGE 1**:
+   - Unified clean sans-serif font: `font-family="{font_family}"` (NO Serif, NO Comic Sans).
+   - **MATCH IMAGE 1's VISUAL WEIGHT & INK DARKNESS**: Use crisp bold `#111111` (NOT timid washed-out grey!) for panel titles, card sub-headers, pill labels, and figure annotations wherever Image 1 uses dark bold black text!
+   - Reference scale on this `{w}x{h}` canvas: panel titles `~{px_panel}px` bold, card headers `~{px_module}px` bold, pill/module labels `~{px_sub}px` bold/semibold, minimum floor `>= {px_floor}px`.
+   - **ZERO `textLength` / `lengthAdjust` SQUASHING!** Wrap multi-line headers cleanly onto 2 `<tspan>` lines matching Image 1's exact line breaks, centered with `text-anchor="middle"` and `dominant-baseline="central"`, with `>= {box_pad_px}px` horizontal padding inside every pill/box and ZERO collisions with icons, borders, or arrows!
+   - Follow `[EXACT TEXT INVENTORY]` strictly for exact spelling (fixing any minor typo in Image 1, zero meta-labels).
 
 {asset_instructions}
 
-EXACT CANVAS & VIEWBOX SAFE-ZONE MANDATE:
-- Root tag MUST be:
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`
-- First child: `<rect x="0" y="0" width="{w}" height="{h}" fill="{pal.get('canvas_bg', '#FFFFFF')}"/>`
-- **STRICT SAFE-ZONE**: EVERY visible `<rect>`, `<image>`, `<text>`, `<path>`, and arrow MUST remain strictly inside `x in [14, {w - 14}]` and `y in [14, {h - 14}]`! Explicitly verify the rightmost column/card satisfies `x + width <= {w - 14}` and centered captions satisfy `x + text_width / 2 <= {w - 12}` so NOTHING is clipped at the right or bottom edge!
-
-ARROW DIRECTION & TOPOLOGY FIDELITY MANDATE (CRITICAL!):
-- Verify the EXACT arrowhead orientation of EVERY connector against BOTH `stage1_draft.png` AND `[FLOW CONNECTIONS]`:
-  * If a lower panel feeds **UP** into an upper panel, the arrowhead tip MUST point **UPWARD** (`y_tip < y_base`), NEVER downward!
-  * If a feedback/RSI connector flows **RIGHT-TO-LEFT**, the arrowhead tip MUST point **LEFT** (`x_tip < x_base`)!
-  * Every inter-panel block arrow MUST sit cleanly in the white gutter between panels without overlapping panel strokes, corners, or labels!
-
-TWO-COLUMN PRINT TYPOGRAPHY CALIBRATION ({resolved_density.upper()} TIER):
-- {density_note}
-- Single unified sans-serif font across ALL text: `font-family="{font_family}"` (NO Serif mixing, NO Comic Sans MS).
-- Define clean `<style>` classes calibrated to this {w}x{h} canvas:
-  * `.title-text`   -> `font-size: {px_title}px; font-weight: 700; fill: {pal.get('text_primary', '#111827')};`
-  * `.panel-title`  -> `font-size: {px_panel}px; font-weight: 700; fill: {pal.get('text_primary', '#111827')};`
-  * `.module-title` -> `font-size: {px_module}px; font-weight: 600; fill: {pal.get('text_primary', '#111827')};`
-  * `.sub-label`    -> `font-size: {px_sub}px; font-weight: 500; fill: {pal.get('text_secondary', '#4B5563')};`
-  * `.arrow-label`  -> `font-size: {px_floor}px; font-weight: 600; fill: {pal.get('text_secondary', '#4B5563')};`
-- **HARD FLOOR**: NEVER use `font-size` smaller than `{px_floor}px` on any readable label!
-- **NEVER USE `textLength` OR `lengthAdjust="spacingAndGlyphs"`** (horizontal glyph squashing ruins publication typography!). Always wrap multi-word labels cleanly onto 2 `<tspan>` lines or widen their container instead.
-- Center labels cleanly with `text-anchor="middle"` and `dominant-baseline="central"`, giving >= {box_pad_px}px horizontal padding inside cards/pills; wrap multi-word labels onto 2 `<tspan>` lines rather than letting text overflow borders.
-
 CLEAN 5-LAYER SEMANTIC GROUPING (FOR EASY EDITING IN ILLUSTRATOR / FIGMA / SVG-EDIT):
-1. `<defs>`: reusable arrowheads / custom wide arrow markers / gradients / soft shadow filter (`#soft-shadow`) / clipPaths for framed assets.
-2. `<g id="layer-backdrop">`: soft tinted zones, colored section header bands, subtle dividers (strictly matching `stage1_draft.png` — NO unnecessary heavy outlines!).
-3. `<g id="layer-modules">`: semantic cards / borderless pastel pills / foundation bars, each wrapped in `<g id="mod-<slug>">`.
-4. `<g id="layer-visual-assets">`: all embedded high-res visual assets (`<image href="__ASSET_...__"/>`) + any crisp vector mini-charts/icons.
-5. `<g id="layer-connectors">`: wide colored block arrows / smooth curves / crisp orthogonal arrows matching `stage1_draft.png` (never slicing through text!).
-6. `<g id="layer-labels-and-legend">`: all crisp editable `<text>` labels, equations, and compact legend.
+1. `<defs>`: reusable arrowheads, `<clipPath>` for rectangular framed assets, and clean `<style>` classes.
+2. `<g id="layer-backdrop">`: outer colored/pastel macro panels & dividers matching Image 1 exact positions.
+3. `<g id="layer-modules">`: `#FFFFFF` inset cards, dashed focal frames, and colored text pills (`<g id="mod-...">`).
+4. `<g id="layer-visual-assets">`: ALL {len(assets)} embedded `<image href="__ASSET_AF..__"/>` assets at exact 1:1 coordinates (NO duplicate hand-drawn shapes behind/over them!).
+5. `<g id="layer-connectors">`: ALL chunky inter-panel block arrows and intra-panel connector arrows matching Image 1 exact boldness & direction.
+6. `<g id="layer-labels-and-legend">`: ALL crisp bold editable `<text>` labels and legend keys positioned with exact parity to Image 1.
 
-XML VALIDITY RULES:
-- Escape `&` as `&amp;`, `<` as `&lt;`, `>` as `&gt;` inside text nodes.
-- NEVER include meta-labels ("SECTION 1", "ZONE 1", "BASELINE", "NOVEL", "HERO VISUAL ASSETS", "<AF>01").
+XML VALIDITY: Escape `&` as `&amp;`, `<` as `&lt;`, `>` as `&gt;`. NEVER render meta-labels ("SECTION 1", "AF01", "<AF>01", "BASELINE", "NOVEL").
 
 === AUTHORITATIVE EXACT TEXT INVENTORY ===
 {json.dumps(inventory, ensure_ascii=False, indent=2)}
 
-=== DISTILLED ART DIRECTION PALETTE ===
+=== DISTILLED COLOR PALETTE ===
 {json.dumps(pal, ensure_ascii=False, indent=2)}
 
-=== STRUCTURED VISUAL SCHEMA ===
+=== FLOW & STRUCTURE REFERENCE ===
 {prompt_body}
 
 OUTPUT ONLY THE COMPLETE, VALID SVG CODE starting with `<svg` and ending with `</svg>`. NO markdown fences, NO explanation.
 """
 
     masked_path = output_dir / "stage1_draft_masked.png"
-    multimodal_inputs: list[Any] = [prompt, "Image 1 — Stage-1 High-Craft Visual Anchor (`stage1_draft.png`):", draft_path]
+    multimodal_inputs: list[Any] = [
+        prompt,
+        f"Image 1 — Target Figure to Replicate 1:1 (`stage1_draft.png`, {w}x{h} px):",
+        draft_path,
+    ]
     if assets and masked_path.is_file():
         multimodal_inputs.extend(
             [
-                "Image 2 — Cropped Visual Asset Mask Overlay (`stage1_draft_masked.png`): "
-                "Every grey `ASSET:...` rectangle marks the EXACT footprint where the corresponding "
-                "`<image href=\"__ASSET_...__\"/>` will appear. DO NOT redraw duplicate cartoon shapes inside these grey boxes "
-                "and keep all text/arrows cleanly outside their boundaries!",
+                f"Image 2 — Cropped Visual Asset Mask Overlay (`stage1_draft_masked.png`, {w}x{h} px): "
+                "Every grey box (`AF01`, `AF02`, ...) marks an exact graphic ALREADY cropped for you — "
+                "DO NOT redraw anything inside these grey boxes; place the corresponding `<image href=\"__ASSET_AF..__\"/>` "
+                "at its exact manifest coordinates and keep all text/arrows cleanly outside their boundaries!",
                 masked_path,
             ]
         )

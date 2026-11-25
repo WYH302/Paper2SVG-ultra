@@ -57,21 +57,14 @@ def compute_svg_viewbox(
     archetype: ArchetypeSpec,
     canonical_width: int = 1600,
 ) -> tuple[int, int]:
-    """Compute a clean integer SVG viewBox faithfully preserving the trimmed Stage-1 draft aspect ratio."""
+    """Use the EXACT 1:1 native pixel dimensions of stage1_draft.png (matching AutoFigure-Edit's
+    zero-scaling coordinate system) so every cropped icon/graphic, panel border, arrow thickness,
+    and font proportion maps 1:1 with ZERO fractional coordinate distortion.
+    """
     dw, dh = draft_img.size
-    if dw <= 0 or dh <= 0:
+    if dw < 64 or dh < 64:
         return archetype.canvas_width, archetype.canvas_height
-
-    ratio = dw / float(dh)
-    if archetype.is_wide_banner:
-        ratio = max(1.55, min(2.65, ratio))
-        width = canonical_width
-    else:
-        ratio = max(1.15, min(2.00, ratio))
-        width = archetype.canvas_width
-
-    height = int(round(width / ratio / 4.0) * 4)
-    return width, max(480, height)
+    return int(dw), int(dh)
 
 
 def generate_stage1_draft(

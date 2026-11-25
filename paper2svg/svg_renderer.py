@@ -98,7 +98,7 @@ def render_dual_preview(
 ) -> str:
     """Render both a high-res preview AND a simulated 7-inch two-column paper print preview."""
     w, _ = viewbox
-    target_full_w = int(round(w * full_zoom))
+    target_full_w = min(3600, int(round(w * full_zoom))) if full_zoom > 1.0 else int(w)
     backend = render_svg_to_png(svg_code, full_png_path, width=target_full_w)
 
     # Render crisp simulated two-column print size (700px wide ~ 7 inches @ 100dpi screen preview)
