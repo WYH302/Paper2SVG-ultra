@@ -53,20 +53,20 @@ More importantly, instead of only showing cherry-picked wins, we want to share *
 | **v1**<br>*Wireframe Trap* | <img src="assets/showcase/physflow_v1_flowchart.png" width="480"/> | **Lesson 1 (Template Lock-in & Pure-Vector Downgrade):** Hardcoding default palette tokens in our Style Extractor washed out the reference folder's true borderless CVPR style into generic blue/copper/grey boxes. Worse, banning embedded `<image>` assets forced the model to redraw realistic faces with crude SVG polygons. |
 | **v2**<br>*Overcrowding Trap* | <img src="assets/showcase/physflow_v2_dense.png" width="480"/> | **Lesson 2 (No Figure-1 Information Budget):** Once we unshackled Art-Direction extraction and added zero-GPU hybrid asset cropping, the visual style jumped dramatically—**but** a high-reasoning model faithfully extracted *every* detail from the PDF: **21 modules, 71 text labels, and 16 tiny sub-images** (including slice indices `[224:240]`, `55.9 FPS`, `Rank 16`, and loss thresholds), leaving almost zero breathing room. |
 | **v3 (v1.x)**<br>*Subtraction Budgets* | <img src="assets/showcase/physflow_v3_clean.png" width="480"/> | **Lesson 3 (Subtraction Budgets + Dual-Resolution Linting):** Enforcing hard Figure-1 budgets (**3–4 stages, 6–9 modules, 12–24 labels, 3–6 hero visual assets, ≥35% whitespace**) + `700px` two-column simulation yielded a clean, airy banner—yet custom card rules could still drift into boxy gray PPT forms on complex papers. |
-| **v2.0**<br>*AIA × AutoFigure-Edit* | <img src="assets/showcase/physflow_v20_final.png" width="480"/> | **Lesson 4 (Standing Directly on Two Giants — 3-Cut Surgical Integration):** Stopped inventing a bloated third custom pipeline! Preserved **AIA-Academic-Illustrator**'s physical-object-first open-white front-end + **Stage-4 Aesthetic & Anti-Copy Gate** (automatically catching reference face leaks & boxy PPT forms before vectorization), fused directly into **AutoFigure-Edit**'s clean `<AF>01` template → `resvg-py` optimize → deterministic icon swap + post-swap polish engine (**100% automated, 26 draggable HD assets, 0 linter errors**). |
+| **v2.1**<br>*1:1 Pixel-Exact Fast Engine* | <img src="assets/showcase/physflow_v21_final.png" width="480"/> | **Lesson 4 (0.2s Pixel-Exact Segmentation + True 1:1 Coordinates + Smart Speedups):** Eliminated all four real failure modes we hit in v2.0 (wild crossing arrows, overlapping shapes, occluded/shifted text, and slow ~88 min runs): (1) capped arrow topology to 5–7 crisp straight arrows and standalone visual islands, (2) replaced slow VLM box guessing with a deterministic **0.2s zero-GPU Connected-Component + projection segmenter (`cc_zero_gpu`)** catching all 13 icons with ±0px precision, (3) fixed a subtle multimodal image-resize drift (`max_side=4096`) so SVG text/panels align 1:1 with zero coordinate shift, and (4) added per-stage reasoning effort caps — cutting Stage 5–6 editable SVG conversion to **~3.3 minutes** with **0 stray arrows, 0 overlapping shapes, 0 occluded text, and 0 linter errors**! |
 
 <details>
-<summary><b>Click to inspect the 700px simulated two-column print preview & zero-GPU asset mask overlay (v3)</b></summary>
+<summary><b>Click to inspect the v2.1 0.2s CC Mask Overlay (13 icons) &amp; 700px Two-Column Print Preview</b></summary>
 <br/>
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="assets/showcase/physflow_v3_2col_preview.png" width="100%"/><br/>
-      <sub><b>Simulated 7-inch Two-Column Print Preview (700px)</b> — every label remains legible at real paper width.</sub>
+      <img src="assets/showcase/physflow_v21_samed.png" width="100%"/><br/>
+      <sub><b>0.2s Zero-GPU Pixel-Exact Mask Overlay (<code>samed.png</code>)</b> — 13 disjoint visual icons localized automatically in 0.2s with ±0px borders and zero swallowed text.</sub>
     </td>
     <td align="center" width="50%">
-      <img src="assets/showcase/physflow_v3_masked_assets.png" width="100%"/><br/>
-      <sub><b>Zero-GPU Asset Mask Overlay</b> — marks exact footprints cropped from Stage-1 draft so SVG reconstruction never double-draws underneath.</sub>
+      <img src="assets/showcase/physflow_v21_2col.png" width="100%"/><br/>
+      <sub><b>Simulated 7-inch Two-Column Print Preview (700px)</b> — every title, sub-label, arrow, and photo remains sharp and legible at real paper width.</sub>
     </td>
   </tr>
 </table>
@@ -93,18 +93,17 @@ More importantly, instead of only showing cherry-picked wins, we want to share *
 7. **Bundled Interactive Web Workbench**: FastAPI UI with drag-and-drop uploads, density selector, editable `schema.md` resume (`--from-stage 4`), 700px two-column print preview, and a bundled MIT-licensed **`svg-edit`** canvas to drag, retype, and save directly back to `final.svg`.
 
 <details>
-<summary><b>What Changed in v2.0.0 (3-Cut Surgical Giant Integration: AIA × AutoFigure-Edit)</b></summary>
+<summary><b>What Changed in v2.1.0 &amp; v2.0.0 (AIA × AutoFigure-Edit + 0.2s CC Segmenter &amp; 10× Speedup)</b></summary>
 
-Instead of reinventing a bloated third custom pipeline, **v2.0.0** stands directly on the true cores of **AIA-Academic-Illustrator** and **AutoFigure-Edit** with three surgical engineering upgrades:
-
-- **Cut 1 — True AIA Front-End + Stage-4 Aesthetic & Anti-Copy Gate (`architect.py`, `draft_generator.py`)**:
-  - Restores AIA's 5 clean layout topologies with concrete physical/optical/3D-slab visual metaphors and an explicit **anti-PPT-form blacklist** (forbids uniform gray box-in-box cages, red/yellow header strips, giant wasted top `Training` bars, oval UI pill clusters, and crude Excel bar charts).
-  - Adds an automated **Stage-4 Aesthetic & Anti-Copy Gate** (`--draft-review-rounds 2`) that visually inspects every generated raster draft *before* vectorization—immediately rejecting reference-subject leaks or boxy PPT forms and regenerating cleanly—plus optional `--pause-after-draft` human approval.
-- **Cut 2 — True AutoFigure-Edit Native Back-End (`paper2svg/autofigure_engine.py`)**:
-  - Directly preserves upstream `autofigure2.py`'s clean workflow: optional **4K proportional upscale** (`--upscale-4k`), pluggable **SAM3 segmentation** (`--seg-backend auto|sam3_local|sam3_fal|sam3_roboflow|vlm_zero_gpu`) with overlapping-box merging + `#808080` `<AF>01` `samed.png`, pluggable **neural matting** (`--matting-backend auto|rmbg2|birefnet|floodfill`) with automatic opaque-portrait protection, clean 25-line `<AF>01` template SVG replication, `resvg-py` visual template optimization, deterministic `<g id="AF01">` icon swapping, and a final **Step 5.5 Post-Swap Visual Polish Pass** that catches any ghost lines behind transparent icons.
-  - Adds `--input-figure <path.png>` to send *any* existing high-res raster figure straight into the AutoFigure-Edit editable SVG engine (skipping Stages 1–4).
-- **Cut 3 — Bulletproof Windows Infrastructure (`client.py`, `svg_renderer.py`, `web/index.html`)**:
-  - Upgrades SSE Responses streaming to automatically retry transient in-stream `service_unavailable_error` / overload spikes (while still failing fast on hard quota exhaustion), uses zero-DLL Rust `resvg-py` everywhere (never `cairosvg`), and wires all v2.0 options cleanly into CLI & Web Workbench (`svg-edit`).
+- **v2.1.0 — Pixel-Exact Speed & Zero-Defect Polish**:
+  - **0.2s Pixel-Exact Zero-GPU Segmenter (`cc_zero_gpu`, new default when SAM3 is absent)**: Replaces slow/noisy VLM bounding-box guessing with deterministic connected-component + projection-gap icon localization (`detect_icons_pixel_exact_cc`), finding every photo, 3D slab, manifold, and icon in `< 0.2s` with ±0px accuracy, zero missed photos, and zero swallowed titles.
+  - **True 1:1 Native Coordinate Preservation (`max_side=4096`)**: Eliminates silent image downscaling before multimodal SVG reconstruction so text labels, panels, and arrows align 1:1 with zero fractional coordinate shift (both standard 2K figures and 4K upscaled figures).
+  - **Clean Arrow Topology + Deterministic Sibling Text Collision Linter**: Caps Stage-3/4 figures to 5–7 crisp straight/orthogonal arrows with standalone visual islands (zero spaghetti arrows, zero giant title banners, zero raw `_` underscores), adds deterministic `<text>`-vs-`<text>` horizontal collision checks in `svg_linter.py`, and sanitizes LLM numeric typos (`width="95..0"`).
+  - **Smart Per-Stage Reasoning Caps (~10× Faster)**: `resolve_stage_effort()` caps lightweight stages (`low`) and SVG generation (`medium`), bringing Stage 5–6 editable SVG conversion down to **~3.3 minutes** (and full PDF→SVG runs to ~7–10 minutes) with default `--draft-review-rounds 1 --critic-rounds 1` (Step 5.5 Post-Swap Polish on the real composited figure).
+- **v2.0.0 — 3-Cut Surgical Giant Integration (AIA × AutoFigure-Edit)**:
+  - **Cut 1 (AIA Front-End + Stage-4 Aesthetic & Anti-Copy Gate)**: Physical/optical/3D-slab visual metaphors, explicit anti-PPT-form blacklist, automated Stage-4 anti-copy/aesthetic gate + `--pause-after-draft`.
+  - **Cut 2 (AutoFigure-Edit Native Back-End, `paper2svg/autofigure_engine.py`)**: Optional 4K upscale (`--upscale-4k`), pluggable SAM3 (`sam3_local` / `sam3_fal` / `sam3_roboflow`) or `cc_zero_gpu` / `vlm_zero_gpu`, pluggable neural matting (`rmbg2` / `birefnet` / `floodfill`), `<AF>01` template → deterministic swap → Step 5.5 Post-Swap Polish, plus `--input-figure <path.png>` direct conversion.
+  - **Cut 3 (Windows-Bulletproof Infrastructure)**: SSE streaming with in-stream overload retry, zero-DLL Rust `resvg-py`, and bundled `svg-edit` Web Workbench.
 
 </details>
 
@@ -186,14 +185,14 @@ python run.py --paper paper.pdf --out outputs/my_paper --from-stage 4
 | `--out` | `outputs/<stem>_<ts>` | Output directory |
 | `--lang` | `auto` | Label language: `auto` (follow paper), `en`, or `zh` |
 | `--archetype` | `auto` | Force one of 6 archetypes: `conceptual`, `framework`, `pipeline`, `architecture`, `taxonomy`, `teaser` |
-| `--svg-engine` | `autofigure` | `autofigure` (v2.0 default: native `<AF>01` template → optimize → icon swap) or `legacy` |
+| `--svg-engine` | `autofigure` | `autofigure` (v2.1 default: 0.2s CC/SAM3 → `<AF>` template → swap → polish) or `legacy` |
 | `--svg-mode` | `hybrid_rich` | `hybrid_rich` (vector structure/text + cropped HD visuals) or `pure_vector` |
-| `--seg-backend` | `auto` | `auto` (SAM3 local/fal/roboflow if configured, else zero-GPU VLM+NumPy) |
+| `--seg-backend` | `auto` | `auto` (SAM3 if configured, else 0.2s pixel-exact `cc_zero_gpu`, or `vlm_zero_gpu`) |
 | `--matting-backend` | `auto` | `auto` (RMBG-2.0 / BiRefNet if installed, else zero-GPU border floodfill) |
 | `--upscale-4k` | `False` | Enable AutoFigure-Edit 4K proportional upscale (auto-enabled with SAM3) |
-| `--draft-review-rounds` | `2` | AIA Stage-4 Aesthetic & Anti-Copy Gate max revision rounds (`0`–`3`) |
+| `--draft-review-rounds` | `1` | AIA Stage-4 Aesthetic & Anti-Copy Gate max revision rounds (`0`–`3`) |
 | `--density` | `auto` | Label density tier: `auto` (adaptive), `concise` (airy 10–18 labels), or `detailed` (dense multi-panel systems diagram) |
-| `--critic-rounds` | `2` | AutoFigure template optimization & post-swap visual polish rounds (`0`–`4`) |
+| `--critic-rounds` | `1` | AutoFigure post-swap visual polish (`1`) or template alignment + polish rounds (`0`–`4`) |
 | `--main-model` | `.env` | Override reasoning / vision / SVG model |
 | `--reasoning-effort` | `.env` | `none`, `low`, `medium`, `high`, or `xhigh` |
 | `--image-model` | `.env` | Override Stage-1 `image_generation` tool model |

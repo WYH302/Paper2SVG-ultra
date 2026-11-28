@@ -9,6 +9,8 @@ from typing import Any, Optional
 
 from PIL import Image
 
+from .config import resolve_stage_effort
+
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 # Neutral fallback ONLY used when the user provides ZERO reference images
@@ -211,7 +213,9 @@ Return ONLY valid JSON (no markdown fences) matching this schema (replace EVERY 
         contents.append(f"Reference Image #{idx} ({img_path.name}):")
         contents.append(img_path)
 
-    raw = client.generate_multimodal(contents, max_output_tokens=6000, temperature=0.25)
+    base_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "medium")
+    eff = resolve_stage_effort(base_eff, "low")
+    raw = client.generate_multimodal(contents, max_output_tokens=6000, temperature=0.25, reasoning_effort=eff)
     parsed = _parse_style_json(raw)
 
     # Merge safely onto fallback only for missing keys

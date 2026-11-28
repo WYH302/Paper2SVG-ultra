@@ -36,7 +36,13 @@ from paper2svg.autofigure_engine import (
     upscale_image_to_4k_if_needed,
 )
 from paper2svg.client import ResponsesAPIClient, is_retryable_stream_error
-from paper2svg.config import Settings, load_settings, resolve_density_mode, sanitize_font_family
+from paper2svg.config import (
+    Settings,
+    load_settings,
+    resolve_density_mode,
+    resolve_stage_effort,
+    sanitize_font_family,
+)
 from paper2svg.draft_generator import audit_stage1_draft_aesthetics, compute_svg_viewbox
 from paper2svg.pdf_parser import extract_pdf_sections
 from paper2svg.style_extractor import discover_reference_images, extract_style_dna
@@ -228,6 +234,15 @@ def test_svg_linter_catches_bad_and_passes_good() -> None:
     assert "Meta-label" in joined
     assert "font-size=12px" in joined
 
+    # Verify sibling text-to-text collision detection catches touching horizontal words (e.g. IdentityGeometry)
+    touching_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 680" width="1600" height="680">
+      <rect width="1600" height="680" fill="#FFFFFF"/>
+      <text x="500" y="300" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Identity</text>
+      <text x="580" y="300" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Geometry</text>
+    </svg>"""
+    rep_touch = lint_svg(touching_svg, expected_viewbox=(1600, 680))
+    assert any("Text collision" in e for e in rep_touch.errors), f"Expected text collision error, got {rep_touch.errors}"
+
 
 def test_strip_edge_text_bleed_preserves_graphic_and_removes_caption_sliver() -> None:
     # Build a 100x80 white image with a main card box (rows 5..64) + 4px white gap + 5px grazed text sliver at bottom (rows 75..79)
@@ -289,7 +304,17 @@ def test_pixel_snapper_and_native_1to1_viewbox() -> None:
     px1, py1, px2, py2 = snap_bbox_to_foreground(p_arr, 30, 20, 178, 240, max_expand=72, ink_threshold=14.0)
     assert px2 >= 218, f"Expected 40px-sliced portrait right edge recovered to >=218, got {px2}"
 
-    # Verify compute_svg_viewbox preserves exact 1:1 native pixel dimensions
+    # Simulate a portrait photo sitting inside a light-gray card (#F4F4F5): MUST NOT expand into the flat gray card!
+    card_arr = np.full((260, 260, 3), 255, dtype=np.float32)
+    card_arr[10:250, 10:250] = [244, 244, 245]  # #F4F4F5 card panel
+    rng_p = np.random.default_rng(7)
+    card_arr[40:160, 50:150] = rng_p.integers(80, 210, size=(120, 100, 3))
+    cx1, cy1, cx2, cy2 = snap_bbox_to_foreground(card_arr, 50, 40, 150, 160, max_expand=72, ink_threshold=14.0)
+    assert cy2 <= 162, f"Expected portrait inside #F4F4F5 panel NOT to bleed down into card, got cy2={cy2}"
+
+    # Verify _sanitize_svg_numeric_typos repairs double-decimal width="95..0"
+    from paper2svg.autofigure_engine import _sanitize_svg_numeric_typos
+    assert _sanitize_svg_numeric_typos('<rect x="314.0" width="95..0" height="134.0"/>') == '<rect x="314.0" width="95.0" height="134.0"/>'
     img = Image.new("RGB", (2016, 756), (255, 255, 255))
     assert compute_svg_viewbox(img, get_archetype("framework")) == (2016, 756)
 
@@ -414,7 +439,11 @@ def test_primary_ref_and_single_style_winner_and_cli_flags() -> None:
 
 
 def test_v20_surgical_giants_aia_gate_autofigure_and_sse_retry() -> None:
-    # 1. SSE transient stream-error retry classifier (must retry overload/503, fail fast on daily quota!)
+    # 1. SSE transient stream-error retry classifier + per-stage effort caps (fast turnaround!)
+    assert resolve_stage_effort("xhigh", "low") == "low"
+    assert resolve_stage_effort("xhigh", "medium") == "medium"
+    assert resolve_stage_effort("low", "medium") == "low"
+    assert resolve_stage_effort("none", "low") == "none"
     assert is_retryable_stream_error("{'type': 'service_unavailable_error', 'message': 'Our servers are currently overloaded.'}")
     assert is_retryable_stream_error("503 temporarily unavailable")
     assert not is_retryable_stream_error("DAILY_LIMIT_EXCEEDED: quota exhausted")
@@ -518,9 +547,42 @@ def test_v20_surgical_giants_aia_gate_autofigure_and_sse_retry() -> None:
             patch = r_arr[60:160, 110:210]
             assert int(np.sum((patch[:, :, 2] > 180) & (patch[:, :, 0] < 100))) > 500
 
-    # 4. Auto backend resolution & v2.0 CLI flags
+    # 4. Auto backend resolution, 0.2s pixel-exact CC detector & v2.0 CLI flags
+    assert resolve_seg_backend("cc_zero_gpu") == "cc_zero_gpu"
     assert resolve_seg_backend("vlm_zero_gpu") == "vlm_zero_gpu"
     assert resolve_matting_backend("floodfill") == "floodfill"
+    from paper2svg.asset_extractor import detect_icons_pixel_exact_cc
+    with tempfile.TemporaryDirectory() as td_cc:
+        cc_img_path = Path(td_cc) / "syn.png"
+        syn = np.full((300, 700, 3), 255, dtype=np.uint8)
+        syn[70:220, 40:180] = [60, 120, 220]      # icon 1
+        syn[143:147, 190:250] = [20, 20, 20]      # thin horizontal arrow between icon 1 & icon 2
+        syn[70:220, 260:400] = [220, 110, 60]     # icon 2
+        syn[70:220, 480:640] = [70, 180, 120]     # icon 3
+        Image.fromarray(syn, mode="RGB").save(cc_img_path)
+        cc_boxes = detect_icons_pixel_exact_cc(cc_img_path)
+        assert len(cc_boxes) == 3, f"Expected 3 disjoint pixel-exact CC icons, got {len(cc_boxes)}: {cc_boxes}"
+        assert abs(cc_boxes[0]["x1"] - 40) <= 4 and abs(cc_boxes[0]["x2"] - 180) <= 4
+        assert abs(cc_boxes[1]["x1"] - 260) <= 4 and abs(cc_boxes[2]["x2"] - 640) <= 4
+    # 5. Verify 1:1 native pixel encoding (zero shrink drift up to 4096px) & ultra-wide banner font floor
+    import base64
+    from io import BytesIO
+    from paper2svg.client import encode_image_to_data_url
+    wide_img = Image.new("RGB", (2162, 445), (255, 255, 255))
+    uri = encode_image_to_data_url(wide_img)
+    dec = Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1])))
+    assert dec.size == (2162, 445), f"Expected 1:1 unscaled encoding for 2162x445, got {dec.size}"
+    wide_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2162 445" width="2162" height="445">'
+        '<rect width="2162" height="445" fill="#ffffff"/>'
+        '<text x="661" y="305" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20">Semantic</text>'
+        '<text x="782" y="305" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20">Identity</text>'
+        '<text x="897" y="305" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20">Geometry</text>'
+        '</svg>'
+    )
+    wide_rep = lint_svg(wide_svg, expected_viewbox=(2162, 445), density="concise")
+    assert wide_rep.passed_hard_checks, f"Expected 20px sub-labels on 4.86:1 banner to pass: {wide_rep.errors}"
+
     parser = cli_run.build_parser()
     parsed = parser.parse_args(
         [
@@ -550,7 +612,7 @@ def test_fastapi_endpoints_and_svgedit() -> None:
     r_cfg = client.get("/api/config")
     assert r_cfg.status_code == 200
     cfg = r_cfg.json()
-    assert cfg["version"] == "2.0.0"
+    assert cfg["version"] == "2.1.0"
     assert cfg["main_model"]
     assert cfg["svg_engine"] in ("autofigure", "legacy")
     assert cfg["svg_mode"] in ("hybrid_rich", "pure_vector")

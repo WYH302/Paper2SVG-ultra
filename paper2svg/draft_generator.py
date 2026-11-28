@@ -12,7 +12,7 @@ from PIL import Image
 
 from .archetypes import ArchetypeSpec
 from .architect import extract_exact_text_inventory, extract_prompt_body
-from .config import resolve_density_mode
+from .config import resolve_density_mode, resolve_stage_effort
 
 
 def smart_trim_white_margins(
@@ -104,9 +104,10 @@ def audit_stage1_draft_aesthetics(
         "In `detailed` systems-architecture mode, clean flat pastel multi-panel grids (like IEEE S&P / USENIX) ARE acceptable "
         "if crisp, aligned, and uncluttered; set `is_ppt_box_form=true` ONLY if panels look messy, dated, gradient-heavy, or overcrowded."
         if resolved_density == "detailed"
-        else "In `concise` CVPR/NeurIPS/Nature overview mode, set `is_ppt_box_form=true` IMMEDIATELY if the figure looks like an ugly "
-        "corporate PowerPoint form: e.g., uniform tall gray rounded boxes wrapping every stage, colored red/yellow header strips inside gray cards, "
-        "a giant wasted top `Training` bar, clusters of oval pill buttons, or ugly crude Excel bar charts instead of clean open-white scientific/physical visuals!"
+        else "In `concise` CVPR/NeurIPS/Nature overview mode, set `is_ppt_box_form=true` ONLY if the figure truly looks like an ugly "
+        "dated PowerPoint form: e.g., harsh dark-bordered nested gray boxes wrapping every stage, bright red/yellow header strips inside gray cards, "
+        "a giant wasted top `Training` bar, clusters of oval pill buttons, or ugly crude Excel bar charts! "
+        "(Do NOT falsely flag clean, modern, subtle borderless pale pastel background zones like `#F4F7FC` or `#FEF3F2` as PPT boxes!)"
     )
 
     audit_prompt = f"""You are a Brutally Honest Principal Art Director for CVPR / NeurIPS / Nature reviewing a freshly generated raster academic figure (`Image 1`) BEFORE it gets vectorized into editable SVG.
@@ -124,13 +125,14 @@ CHECK ALL 4 GATES STRICTLY:
      * `9.0–10.0`: Truly looks like a CVPR Best Paper / Nature flagship figure — clean open white breathing space, gorgeous physical/optical/3D-block/photographic visuals, effortless 3-second comprehension, publication typography.
      * `7.5–8.9`: Decent layout but has noticeable visual flaws (minor clutter, weak visual metaphor, uneven alignment, or a couple of label/arrow issues).
      * `< 7.5`: Ugly boxy PPT form, cramped text, crude bar charts, wasted gray headers, or amateur aesthetic.
-3. **TEXT & SPELLING ACCURACY (`text_or_arrow_errors`)**:
-   - Check EVERY visible word in `Image 1` against the Expected Text Inventory below: report ANY misspelling, garbled letters, duplicate/unwanted meta-labels ("ZONE 1", "SECTION"), cut-off edges, or confusing/reversed arrows.
+3. **ARROW, OVERLAP & SPELLING AUDIT (`text_or_arrow_errors`) — CRITICAL!**:
+   - Check EVERY arrow in `Image 1`: report ANY stray/stub arrow pointing into empty space, ANY arrow pointing at floating title text, ANY crossing diagonal arrow spiderweb, or ANY double/redundant parallel arrows!
+   - Check EVERY graphic and label: report ANY overlapping/fused shapes (e.g., 3D slabs merged across text), ANY clipped/occluded text, ANY raw programming underscore `_` (like `c_sem` or `x_0`), or ANY misspelled/garbled word!
 4. **ACTIONABLE FIX PLAN (`revision_mode`, `fix_instructions`)**:
    - `revision_mode`:
-     * `"pass"`: ONLY if `reference_content_leaked == false` AND `is_ppt_box_form == false` AND `aesthetic_score_10 >= 8.5` AND `text_or_arrow_errors` is empty!
-     * `"regenerate_clean"`: if `reference_content_leaked == true` OR `is_ppt_box_form == true` OR `aesthetic_score_10 < 7.8` (needs fresh cleaner composition — drop contaminating reference portrait!).
-     * `"targeted_edit"`: if the overall art direction & composition are already gorgeous (`>= 7.8`, no leak, not PPT-boxy) and ONLY specific text typos, arrow tweaks, or small element fixes are needed!
+     * `"pass"`: ONLY if `reference_content_leaked == false` AND `is_ppt_box_form == false` AND `aesthetic_score_10 >= 8.3` AND `text_or_arrow_errors` is empty!
+     * `"regenerate_clean"`: if `reference_content_leaked == true` OR `is_ppt_box_form == true` OR `aesthetic_score_10 < 7.5` OR there are major arrow-spaghetti/shape-overlap defects.
+     * `"targeted_edit"`: if the overall composition is clean (`>= 7.5`, no leak, not PPT-boxy) and ONLY minor text typos or 1–2 small arrow fixes are needed!
 
 === EXPECTED TEXT INVENTORY ===
 {json.dumps(inventory, ensure_ascii=False, indent=2)}
@@ -163,7 +165,9 @@ Return ONLY valid JSON (no markdown fences):
             ]
         )
 
-    raw = client.generate_multimodal(contents, max_output_tokens=4000, temperature=0.15)
+    base_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "medium")
+    gate_eff = resolve_stage_effort(base_eff, "low")
+    raw = client.generate_multimodal(contents, max_output_tokens=3000, temperature=0.15, reasoning_effort=gate_eff)
     parsed = _parse_gate_json(raw)
     score = float(parsed.get("aesthetic_score_10") or 7.0)
     leaked = bool(parsed.get("reference_content_leaked", False))
@@ -171,10 +175,10 @@ Return ONLY valid JSON (no markdown fences):
     errs = [str(x) for x in (parsed.get("text_or_arrow_errors") or []) if str(x).strip()]
     mode = str(parsed.get("revision_mode") or "").strip().lower()
 
-    # Deterministic gate enforcement (never let a leaked or PPT-boxy draft silently pass!)
-    if leaked or ppt_boxy or score < 7.8:
+    # Deterministic gate enforcement (reject leaked, truly PPT-boxy, or low-quality drafts; pass crisp >=8.0 clean drafts!)
+    if leaked or ppt_boxy or score < 7.2:
         mode = "regenerate_clean"
-    elif errs or score < 8.5:
+    elif (errs and len(errs) >= 3) or score < 8.0:
         if mode != "regenerate_clean":
             mode = "targeted_edit"
     else:
@@ -223,11 +227,13 @@ def _build_stage4_render_prompt(
         )
     else:
         craft_mandate = (
-            "1. **OPEN-CANVAS PUBLICATION MINIMALISM (40%–50% PURE `#FFFFFF` WHITESPACE!)**:\n"
-            "   - Let concrete scientific visuals (portraits/specimens, 3D/isometric optical or hardware setups, sleek trapezoid/layered transformer blocks with ❄/🔥 icons, smooth signal curves, crisp directional arrows) breathe openly on pure white canvas!\n"
+            "1. **OPEN-CANVAS PUBLICATION MINIMALISM (45%–55% PURE `#FFFFFF` WHITESPACE!)**:\n"
+            "   - Keep ONLY 6–10 crisp standalone visual islands with >=25px pure white clearance on ALL 4 sides — NEVER fuse a 3D neural block directly onto a sub-card with text across the seam, and NEVER stack crowded overlapping sub-thumbnails!\n"
             "   - **STRICTLY FORBIDDEN**: NO uniform row of tall gray rounded boxes wrapping every stage, NO red/yellow colored card header strips, NO giant wasted top `Training` bar, NO clusters of oval UI pill buttons, and NO ugly crude Excel bar charts!\n"
-            "2. **BIG, CRISP VISUAL HEROES & SHARP TYPOGRAPHY**:\n"
-            "   - Visual objects carry ~60% of the visual weight; render ONLY the concise strings in `[EXACT TEXT INVENTORY]` in clean bold academic sans-serif (Inter / Helvetica / Arial), effortlessly readable at 7-inch two-column print width."
+            "2. **CLEAN ORTHOGONAL ARROWS (MAX 5–7 ARROWS TOTAL — ZERO SPAGHETTI!)**:\n"
+            "   - Every arrow MUST cleanly connect one named object edge to the next named object edge. STRICTLY FORBIDDEN: stray arrow stubs pointing into empty space, arrows pointing at floating title text, diagonal spiderwebs, or duplicate parallel arrows!\n"
+            "3. **CRISP TYPOGRAPHY OUTSIDE ALL GRAPHICS (ZERO RAW `_` UNDERSCORES!)**:\n"
+            "   - Place every label cleanly ABOVE or BELOW its visual island with generous white clearance (ZERO text touching icons or borders). NEVER write raw programming underscores like `c_sem` or `x_0` — render real clean math subscripts or clean words."
         )
 
     revision_block = (

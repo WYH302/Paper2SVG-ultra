@@ -1,4 +1,4 @@
-"""FastAPI Web Workbench for Paper2SVG-ultra v2.0 (AIA Front-End + AutoFigure-Edit Back-End + svg-edit)."""
+"""FastAPI Web Workbench for Paper2SVG-ultra v2.1 (AIA Front-End + AutoFigure-Edit Back-End + svg-edit)."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ SVG_EDIT_DIR = _find_svg_edit_dir()
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Paper2SVG-ultra v2.0 Workbench")
+app = FastAPI(title="Paper2SVG-ultra v2.1 Workbench")
 
 # Mount bundled MIT-licensed svg-edit canvas
 if SVG_EDIT_DIR is not None:
@@ -235,7 +235,7 @@ def get_config() -> JSONResponse:
     )
     return JSONResponse(
         {
-            "version": "2.0.0",
+            "version": "2.1.0",
             "main_model": s.main_model,
             "reasoning_effort": s.reasoning_effort,
             "image_tool_model": s.image_tool_model,

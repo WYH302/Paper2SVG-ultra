@@ -349,9 +349,9 @@
             <div>
               <label>视觉 Critic 精修轮数</label>
               <select id="criticRounds">
-                <option value="2" selected>2 轮（推荐）</option>
+                <option value="1" selected>1 轮（v2.1 推荐 · 贴图后终检抛光，快 3×）</option>
+                <option value="2">2 轮（额外灰框对齐 + 贴图终检）</option>
                 <option value="3">3 轮（极致打磨）</option>
-                <option value="1">1 轮（快速验证）</option>
               </select>
             </div>
           </div>
@@ -360,15 +360,15 @@
             <div>
               <label>SVG 引擎 (Cut 2)</label>
               <select id="svgEngine">
-                <option value="autofigure" selected>AutoFigure-Edit 原生引擎（v2.0 推荐）</option>
+                <option value="autofigure" selected>AutoFigure-Edit 原生引擎（v2.1 推荐 · 0.2s CC 抠图）</option>
                 <option value="legacy">Legacy 引擎</option>
               </select>
             </div>
             <div>
               <label>Stage-4 底图审美闸门轮数</label>
               <select id="draftReviewRounds">
-                <option value="2" selected>2 轮自动把关（推荐）</option>
-                <option value="1">1 轮</option>
+                <option value="1" selected>1 轮自动把关（v2.1 推荐）</option>
+                <option value="2">2 轮</option>
                 <option value="0">关闭自动重绘</option>
               </select>
             </div>
@@ -513,12 +513,12 @@
       document.getElementById("imageModel").value = cfg.image_tool_model || "";
       document.getElementById("svgMode").value = cfg.svg_mode || "hybrid_rich";
       document.getElementById("svgEngine").value = cfg.svg_engine || "autofigure";
-      document.getElementById("draftReviewRounds").value = String(cfg.draft_review_rounds ?? 2);
+      document.getElementById("draftReviewRounds").value = String(cfg.draft_review_rounds ?? 1);
       document.getElementById("density").value = cfg.density || "auto";
-      document.getElementById("criticRounds").value = String(cfg.critic_rounds || 2);
+      document.getElementById("criticRounds").value = String(cfg.critic_rounds ?? 1);
       const imgLabel = cfg.image_tool_model || "default image_gen";
       document.getElementById("badgeModels").textContent = `${cfg.main_model} (${cfg.reasoning_effort || "high"}) + ${imgLabel}`;
-      document.getElementById("badgeMode").textContent = `v2.0 AIA × AutoFigure (${cfg.resolved_seg_backend || "auto"} / ${cfg.resolved_matting_backend || "auto"})`;
+      document.getElementById("badgeMode").textContent = `v2.1 AIA × AutoFigure (${cfg.resolved_seg_backend || "auto"} / ${cfg.resolved_matting_backend || "auto"})`;
       svgEditUrl = cfg.svg_edit_url;
 
       const sel = document.getElementById("archetype");

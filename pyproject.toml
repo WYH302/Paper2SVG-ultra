@@ -1,6 +1,6 @@
 [project]
 name = "paper2svg-ultra"
-version = "2.0.0"
+version = "2.1.0"
 description = "AIA-Academic-Illustrator × AutoFigure-Edit surgical giant pipeline (PDF or Raster Figure -> Editable Top-Venue SVG)"
 readme = "README.md"
 license = { text = "MIT" }

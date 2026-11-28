@@ -10,6 +10,7 @@ from typing import Any
 import pymupdf
 
 from .archetypes import format_archetype_menu
+from .config import resolve_stage_effort
 
 # Sections to skip so noisy citations/surveys never pollute the overview figure
 DROP_SECTION_PATTERNS = re.compile(
@@ -283,7 +284,9 @@ Return ONLY valid JSON (no markdown code fences, no commentary) matching this ex
 === EXTRACTED PAPER CONTENT ===
 {pdf_info['extracted_text']}
 """
-    raw = client.generate_text(prompt, max_output_tokens=10000, temperature=0.2)
+    base_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "medium")
+    eff = resolve_stage_effort(base_eff, "low")
+    raw = client.generate_text(prompt, max_output_tokens=8000, temperature=0.2, reasoning_effort=eff)
     return _parse_json_strict(raw, fallback_key="paper_analysis")
 
 

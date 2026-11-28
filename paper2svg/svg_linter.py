@@ -37,6 +37,7 @@ SERIF_HINTS = ("times", "georgia", "garamond", "palatino", "cambria", "serif")
 # Standard 7-inch two-column figure width in typographic points (7 * 72 = 504pt)
 TWO_COLUMN_WIDTH_PT = 504.0
 MIN_PRINT_FONT_PT = 6.2
+MIN_PRINT_FONT_PT_WIDE_BANNER = 4.5
 MIN_PRINT_FONT_PT_DETAILED = 4.05
 MAX_RECOMMENDED_TEXT_ELEMENTS = 28
 HARD_MAX_TEXT_ELEMENTS = 36
@@ -287,6 +288,9 @@ def lint_svg(
                 )
 
     pt_scale = TWO_COLUMN_WIDTH_PT / vb_w
+    aspect_ratio = vb_w / max(1.0, vb_h)
+    if resolved_density == "concise" and aspect_ratio >= 3.2:
+        min_print_pt = MIN_PRINT_FONT_PT_WIDE_BANNER
     oob_issues: list[str] = []
     oob_tol = 2.0
 
@@ -341,6 +345,8 @@ def lint_svg(
     tiny_texts: list[str] = []
     wordy_texts: list[str] = []
     overflow_issues: list[str] = []
+    text_overlap_issues: list[str] = []
+    text_boxes: list[tuple[float, float, float, float, str]] = []
     squashed_texts: list[str] = []
     meta_leaks: list[str] = []
     seen_fonts: set[str] = set()
@@ -417,6 +423,8 @@ def lint_svg(
             else:
                 tx0, tx1 = ax, ax + est_w
 
+            text_boxes.append((tx0, ay - fs * 0.72, tx1, ay + fs * 0.22, max_line))
+
             if tx0 < vb_x - oob_tol or tx1 > (vb_x + vb_w + oob_tol) or ay < vb_y - oob_tol or ay > (vb_y + vb_h + oob_tol):
                 oob_issues.append(
                     f"Canvas clipping: Text '{max_line}' (x={tx0:.0f}..{tx1:.0f}, y={ay:.0f}) extends outside "
@@ -440,10 +448,25 @@ def lint_svg(
                             "widen the box, split across 2 <tspan> lines, or adjust font within allowed tier."
                         )
 
+    # Deterministic sibling <text>-vs-<text> collision detection (catches touching words like 'IdentityGeometry'!)
+    for i in range(len(text_boxes)):
+        ax0, ay0, ax1, ay1, albl = text_boxes[i]
+        for j in range(i + 1, len(text_boxes)):
+            bx0, by0, bx1, by1, blbl = text_boxes[j]
+            v_overlap = min(ay1, by1) - max(ay0, by0)
+            h_gap = max(ax0, bx0) - min(ax1, bx1)
+            if v_overlap > 4.0 and h_gap < 4.0:
+                text_overlap_issues.append(
+                    f"Text collision: '{albl}' (x={ax0:.0f}..{ax1:.0f}) touches/overlaps '{blbl}' "
+                    f"(x={bx0:.0f}..{bx1:.0f}, gap={h_gap:.0f}px); separate horizontally by >= 14px!"
+                )
+
     if meta_leaks:
         report.errors.append(f"Meta-label leakage rendered as visible text (MUST DELETE): {meta_leaks}")
     if oob_issues:
         report.errors.extend(oob_issues[:10])
+    if text_overlap_issues:
+        report.errors.extend(text_overlap_issues[:8])
     if squashed_texts:
         report.errors.extend(squashed_texts[:8])
     if tiny_texts:

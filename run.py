@@ -1,4 +1,4 @@
-"""CLI entry point for Paper2SVG-ultra v2.0 (AIA Front-End + AutoFigure-Edit Back-End)."""
+"""CLI entry point for Paper2SVG-ultra v2.1 (AIA Front-End + AutoFigure-Edit Back-End)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ console = Console()
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="paper2svg",
-        description="Paper2SVG-ultra v2.0: AIA-Academic-Illustrator + AutoFigure-Edit Surgical Giant Pipeline (PDF or Figure -> Editable SVG)",
+        description="Paper2SVG-ultra v2.1: AIA-Academic-Illustrator + AutoFigure-Edit Surgical Giant Pipeline (PDF or Figure -> Editable SVG)",
     )
     parser.add_argument("--paper", type=Path, default=None, help="Path to your full research paper PDF")
     parser.add_argument(
@@ -94,13 +94,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--svg-engine",
         choices=["autofigure", "legacy"],
         default=None,
-        help="autofigure (v2.0 default: true AutoFigure-Edit <AF> template -> optimize -> icon swap) or legacy",
+        help="autofigure (v2.1 default: true AutoFigure-Edit <AF> template -> optimize -> icon swap) or legacy",
     )
     parser.add_argument(
         "--seg-backend",
-        choices=["auto", "sam3_local", "sam3_fal", "sam3_roboflow", "vlm_zero_gpu"],
+        choices=["auto", "sam3_local", "sam3_fal", "sam3_roboflow", "cc_zero_gpu", "vlm_zero_gpu"],
         default=None,
-        help="Icon segmentation backend (default: auto -> SAM3 local/fal/roboflow if configured, else zero-GPU VLM+NumPy)",
+        help="Icon segmentation backend (default: auto -> SAM3 if configured, else 0.2s pixel-exact cc_zero_gpu)",
     )
     parser.add_argument(
         "--matting-backend",
@@ -189,7 +189,7 @@ def main() -> int:
         port = args.port or settings.server_port
         console.print(
             Panel.fit(
-                f"[bold cyan]Paper2SVG-ultra v2.0 Web Workbench[/bold cyan]\n"
+                f"[bold cyan]Paper2SVG-ultra v2.1 Web Workbench[/bold cyan]\n"
                 f"URL: [link=http://{host}:{port}]http://{host}:{port}[/link]\n"
                 f"Main Model: [green]{settings.main_model}[/green] (effort={settings.reasoning_effort}) | "
                 f"SVG Engine: [green]{settings.svg_engine}[/green] (seg={settings.seg_backend}, matting={settings.matting_backend})",
@@ -250,7 +250,7 @@ def main() -> int:
             + f"[bold]Models:[/bold] {settings.main_model} (effort={settings.reasoning_effort}) + {settings.image_tool_model or 'default'}\n"
             + f"[bold]Engine:[/bold] {settings.svg_engine} | [bold]Seg:[/bold] {settings.seg_backend} | "
             + f"[bold]Matting:[/bold] {settings.matting_backend} | [bold]Density:[/bold] {settings.density}",
-            title="[bold cyan]Paper2SVG-ultra v2.0 (AIA × AutoFigure-Edit)[/bold cyan]",
+            title="[bold cyan]Paper2SVG-ultra v2.1 (AIA × AutoFigure-Edit)[/bold cyan]",
         )
     )
 

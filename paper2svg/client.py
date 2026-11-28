@@ -34,8 +34,13 @@ RETRYABLE_STREAM_ERROR_MARKERS = (
 )
 
 
-def encode_image_to_data_url(image: ImageInput, max_side: int = 1800) -> str:
-    """Load an image (path or PIL.Image), resize safely if oversized, and encode as PNG data URL."""
+def encode_image_to_data_url(image: ImageInput, max_side: int = 4096) -> str:
+    """Load an image (path or PIL.Image), resize safely only if oversized (>4096px), and encode as PNG data URL.
+
+    Keeping max_side=4096 preserves exact 1:1 native pixel coordinates for BOTH standard Stage-1 figures
+    (1500–2200px wide) AND 4K SAM3-upscaled figures (3840px wide) so multimodal SVG coordinate placement
+    has ZERO fractional shrink drift!
+    """
     if isinstance(image, (str, Path)):
         img = Image.open(image)
         img.load()

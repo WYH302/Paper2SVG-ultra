@@ -1,4 +1,4 @@
-"""Stage 3 (Cut 1A): True AIA-Academic-Illustrator Visual Architect + Strict Anti-PPT-Form Rules."""
+"""Stage 3 (Cut 1A): Clean AIA-Academic-Illustrator Visual Architect — Zero Spaghetti Arrows, Zero Overlap."""
 
 from __future__ import annotations
 
@@ -7,44 +7,51 @@ import re
 from typing import Any
 
 from .archetypes import ArchetypeSpec, get_archetype
+from .config import resolve_stage_effort
 
-# Preserved core layout decision table from AIA-Academic-Illustrator (prompts_config.py / visual-schema.md)
-AIA_LAYOUT_SELECTOR_BLOCK = """=== AIA PHASE 1: LAYOUT STRATEGY SELECTOR (PICK THE SINGLE CLEANEST TOPOLOGY!) ===
-Choose ONE primary topology (or minimal natural combination) strictly driven by the paper's scientific logic:
-1. `Linear Pipeline` (Left -> Right): sequential signal/data transformation, encoding-decoding, sensing-to-reconstruction.
-2. `Cyclic / Iterative`: optimization, proximal projection, RL, or alternating solver loops with explicit curved feedback arrows.
-3. `Hierarchical Stack` (Top -> Down / Bottom -> Up): multi-scale features, coarse-to-fine pyramids, or tree abstractions.
-4. `Parallel / Dual-Stream`: multi-modal fusion, contrastive alignment, dual-domain conditioning branches merging cleanly.
-5. `Central Hub`: central foundation model / agent / orchestrator interacting radially with surrounding tools or environments.
+AIA_LAYOUT_SELECTOR_BLOCK = """=== AIA PHASE 1: LAYOUT STRATEGY SELECTOR ===
+Choose ONE clean primary topology driven by the paper's core story:
+1. `Linear Pipeline` (Left -> Right): sequential signal/data transformation, sensing-to-reconstruction, encoding-decoding.
+2. `Cyclic / Iterative`: optimization, proximal solver, or RL loop with ONE clean outer return arc.
+3. `Hierarchical Stack` (Top -> Down / Bottom -> Up): multi-scale features or tree abstractions.
+4. `Parallel / Dual-Stream`: two parallel branches merging cleanly into one unified output.
+5. `Central Hub`: central coordinator interacting radially with clean surrounding tools.
 """
 
-ANTI_PPT_FORM_RULES_CONCISE = """=== STRICT ANTI-PPT-FORM & PUBLICATION AESTHETIC RULES (NON-NEGOTIABLE!) ===
-You are illustrating a flagship CVPR / NeurIPS / SIGGRAPH / Nature figure — NEVER a 2012 corporate PowerPoint form!
-1. **OPEN PURE-WHITE CANVAS (NO BOX-IN-BOX-IN-BOX CAGES!)**:
-   - Let concrete scientific visuals, portraits/specimens, 3D/isometric optical or neural blocks, and clean mathematical flow arrows **float openly on pure `#FFFFFF` white space** (like CVPR 2025 LSI / NeurIPS OSEDiff / CVPR JiT)!
-   - **STRICTLY FORBIDDEN** to wrap every stage in uniform tall gray rounded boxes lined up like a spreadsheet/tax form!
-   - **STRICTLY FORBIDDEN** to draw colored top header strips (red/yellow banners) inside gray cards, or stack rows of oval UI "pill buttons" (`55.9 FPS`, `0.36s Fast`, etc.)!
-   - Use AT MOST 1–2 subtle soft borderless tint zones (`#F5F7FA` / `#FDF6EC`, zero dark outline) ONLY if a specific iterative loop or shared module truly benefits from grouping!
-2. **CONCRETE PHYSICAL / OPTICAL / 3D-LAYERED OBJECTS (NEVER CRUDE EXCEL BAR CHARTS OR EMPTY TEXT BOXES!)**:
-   - Every major stage MUST be anchored by a crisp, authentic **concrete scientific visual object**:
-     * Sensing / optics -> realistic target subject + crisp 3D/isometric binary mask / optical lens / photodetector + sleek 1D continuous signal waveform (NEVER ugly jagged Excel bar histograms!).
-     * Neural backbones -> sleek **trapezoid / 3D stacked translucent transformer blocks** with a crisp snowflake (❄) for Frozen weights and tiny flame (🔥) for Trainable adapters — NEVER a boring gray box with 3 lines of centered text!
-     * Intermediate representations -> real progressive visual frames (blurry -> noisy -> refined -> razor-sharp output), compact clean color-coded token strips, or crisp geometric wireframe/mesh overlays!
-3. **ZERO WASTED TOP "TRAINING" BAR**:
-   - **NEVER** draw a giant full-width rounded bar across the top of the canvas just to hold 2 loss pills!
-   - If training vs. inference losses are needed, show them cleanly as compact, unobtrusive dashed supervision arrows (`L_code`, `L_opt`) tucked tightly above the exact trainable modules — costing near-zero vertical height!
-4. **RUTHLESS LABEL DISCIPLINE (`concise` CVPR/NeurIPS/Nature budget)**:
-   - **`[EXACT TEXT INVENTORY]` HARD CAP: 10 to 18 crisp labels MAX!** (1–3 words or compact math symbol each!)
-   - Drop benchmark speed numbers (`55.9 FPS`, `0.36s / 0.92s`), verbose multi-word jargon stacks, and redundant subtitles — those belong in the paper caption/tables, NOT crammed into pill badges!
-   - Keep **40%–50% of the canvas pure `#FFFFFF` open breathing space**!
+CLEAN_TOPOLOGY_RULES_CONCISE = """=== STRICT ZERO-COLLISION, ZERO-SPAGHETTI & PUBLICATION CRAFT RULES (NON-NEGOTIABLE!) ===
+Look at why flagship CVPR / NeurIPS / AutoFigure-Edit figures look breathtaking at a glance:
+EVERY visual object is a clean standalone island, EVERY text label sits in open white space, and EVERY arrow is crystal clear!
+
+1. **STRICT ARROW DISCIPLINE (HARD CAP: 5 TO 7 CLEAN ARROWS TOTAL — ZERO SPAGHETTI!)**:
+   - **MAX 5 to 7 arrows** across the ENTIRE figure!
+   - Use clean **straight horizontal/vertical orthogonal arrows** connecting the right edge of Stage k -> left edge of Stage k+1!
+   - Allow **AT MOST 1–2** clean outer bypass/feedback arrows routed cleanly around the outer bottom/top white margin (NEVER cutting diagonally through the middle!).
+   - **STRICTLY FORBIDDEN**:
+     * NEVER draw arrows pointing to floating title text (e.g., NEVER draw a stub arrow pointing up at `MiniT2I-B/16`!).
+     * NEVER draw two parallel/overlapping arrows between the same modules!
+     * NEVER start or end an arrow in empty white space — every arrow MUST connect two named visible objects!
+2. **ISLAND SEPARATION DISCIPLINE (HARD CAP: 6 TO 10 STANDALONE VISUAL ISLANDS — ZERO FUSED SEAMS!)**:
+   - **MAX 6 to 10 crisp, self-contained visual objects** across the entire figure (NEVER 20–26 crowded micro-widgets!).
+   - **EVERY visual object (portrait, DMD optical setup, neural block, waveform, face strip) MUST be an independent island surrounded by >= 20px of open white/uniform margin on ALL 4 sides!**
+   - **STRICTLY FORBIDDEN** to fuse a 3D neural block directly onto a sub-card with text across the seam (e.g., NEVER merge 3D transformer slabs onto a card containing `LP-Flow` text!). Put the neural block and the flow progression strip cleanly SIDE-BY-SIDE or neatly stacked with generous white separation!
+   - **ZERO TEXT INSIDE OR TOUCHING ICONS**: Place every label cleanly ABOVE or BELOW its visual island with clear empty margin — NEVER overlapping any graphic, border, or arrow!
+3. **OPEN PURE-WHITE CANVAS (NO BOXY PPT FORMS!)**:
+   - Let standalone visual islands float cleanly on pure `#FFFFFF` white space (45–55% open pure white!).
+   - **NO** uniform tall gray rounded boxes wrapping every stage, **NO** red/yellow header strips inside cards, **NO** giant top `Training` bar, **NO** oval UI pill buttons, and **NO** crude Excel bar charts!
+   - Use AT MOST 1–2 subtle soft pale-tint grouping zones (`#F4F7FB` / `#FFF7ED`, hairline or borderless) ONLY where functionally helpful, with generous padding so nothing touches the edge!
+4. **CRISP TYPOGRAPHY, NO GIANT FIGURE TITLE & ZERO LITERAL UNDERSCORES (`_`)**:
+   - **NEVER put a giant paper-title banner across the top of the diagram** (e.g., DO NOT put `"PhysFlow"` as a huge standalone top header — the paper's LaTeX `Figure 1:` caption already gives the title, and removing it gives 25% more vertical scale to the actual architecture!).
+   - **`[EXACT TEXT INVENTORY]` HARD CAP: 10 to 16 ultra-crisp labels MAX!** (1–3 words each; drop FPS/latency numbers like `55.9 FPS` / `0.36s`!)
+   - **STRICTLY FORBIDDEN to use raw programming underscores `_` in visible labels!** Write `x₀ → x₁` (Unicode subscripts) or clean readable short phrases (`Semantic`, `Identity`, `Geometry`, `y`) instead of ugly `c_sem`, `c_id`, `c_geo`, `x_0 -> x_1`!
+   - When placing 3 sibling sub-labels horizontally (e.g., `Semantic`, `Identity`, `Geometry`), leave generous horizontal spacing (`>= 30px` gap between adjacent labels) so words NEVER touch each other!
 5. **100% ORIGINAL SUBJECTS (ZERO REFERENCE CONTENT LEAK!)**:
-   - If the paper involves human faces, animals, scenes, or medical samples, explicitly specify a **completely fresh, ordinary, natural-looking subject** (e.g., neutral warm daylight studio portrait of a young woman or man with natural dark hair — NEVER copying any distinctive face, blue hair, clothing, or artwork from any reference image!).
+   - If the paper shows a human face/scene/object, specify a fresh, ordinary, natural studio subject with ZERO resemblance to any reference image portrait/face/hair/artwork.
 """
 
 DETAILED_SYSTEMS_RULES = """=== DENSE SYSTEMS ARCHITECTURE BUDGET (`detailed` mode — IEEE S&P / USENIX / OSDI) ===
-1. **`[EXACT TEXT INVENTORY]` TARGET CAP: 24 to 50 crisp items MAX!** Preserve core subsystems, resource/knowledge plane modules, and closed-loop verification labels cleanly (each 1–4 words; NEVER full sentences).
-2. **CLEAN 2-ROW MULTI-PANEL DISCIPLINE**: When matching a multi-panel systems reference (e.g. IEEE S&P / USENIX), keep flat pastel panels crisp with uniform pure `#FFFFFF` gutters, zero 3D plastic clutter, bold uniform borders, and crisp domain micro-visuals (hardware schematic, real multi-frequency waveforms, spectrograms, compact workflow DAG, single-color neural wireframes).
-3. **ZERO META-LABELS OR REFERENCE TEXT LEAKS**: Only render paper-grounded labels from `[EXACT TEXT INVENTORY]`.
+1. **`[EXACT TEXT INVENTORY]` TARGET CAP: 24 to 48 crisp items MAX!** Preserve core subsystems cleanly (1–4 words each; zero sentences; zero raw `_` underscores).
+2. **CLEAN 2-ROW MULTI-PANEL DISCIPLINE**: Uniform crisp flat pastel panels with wide `#FFFFFF` gutters, zero overlapping shapes, zero stray arrows, every icon cleanly separated from every text label!
+3. **EXACT ORTHOGONAL CONNECTORS**: Clean inter-panel block arrows centered in white gutters with explicit direction (`pointing RIGHT/DOWN/UP/LEFT`).
 """
 
 
@@ -58,55 +65,53 @@ def generate_visual_schema(
     archetype_override: str | None = None,
     density: str = "auto",
 ) -> tuple[str, ArchetypeSpec]:
-    """Generate a lean, physical-object-first AIA Visual Schema (`schema.md`)."""
+    """Generate a lean, clean-topology, zero-overlap AIA Visual Schema (`schema.md`)."""
     chosen_key = archetype_override or paper_analysis.get("recommended_archetype", "pipeline")
     archetype = get_archetype(chosen_key)
     is_detailed = (density or "auto").strip().lower() == "detailed"
 
     lang_rule = (
-        "All labels in [EXACT TEXT INVENTORY] MUST be crisp academic English (1–3 words or math symbol each; ZERO sentences)."
+        "All labels in [EXACT TEXT INVENTORY] MUST be crisp academic English (1–3 words each; ZERO raw underscores `_`; ZERO sentences)."
         if target_lang == "en"
-        else "所有 [EXACT TEXT INVENTORY] 中的标签必须为极简学术中文并保留通用英文缩写（每条 2–6 字，绝不写长句）。"
+        else "所有 [EXACT TEXT INVENTORY] 中的标签必须为极简学术中文并保留通用英文缩写（每条 2–6 字，严禁出现下划线 `_` 或长句）。"
     )
 
     banner_rule = (
-        f"Sleek wide two-column panoramic canvas (~2.3:1 aspect ratio, ~{archetype.canvas_width}x{archetype.canvas_height}) "
-        "on pure `#FFFFFF` background with generous white breathing margins."
+        f"Clean wide two-column panoramic canvas (~2.3:1 ratio, ~{archetype.canvas_width}x{archetype.canvas_height}) "
+        "on pure `#FFFFFF` background with wide symmetric outer margins."
         if archetype.is_wide_banner
         else f"Balanced worked-example canvas (~1.6:1, ~{archetype.canvas_width}x{archetype.canvas_height}) on pure `#FFFFFF` background."
     )
 
-    aesthetic_block = DETAILED_SYSTEMS_RULES if is_detailed else ANTI_PPT_FORM_RULES_CONCISE
-    inv_cap_hint = "24–50 concise items" if is_detailed else "strictly 10–18 ultra-crisp items MAX"
+    aesthetic_block = DETAILED_SYSTEMS_RULES if is_detailed else CLEAN_TOPOLOGY_RULES_CONCISE
+    inv_cap_hint = "24–48 concise items" if is_detailed else "strictly 10–16 crisp items MAX (ZERO raw `_` underscores!)"
+    conn_cap_hint = "clean orthogonal arrows only" if is_detailed else "STRICTLY 5 to 7 clean non-crossing orthogonal arrows MAX!"
 
     style_clean = {k: v for k, v in style_dna.items() if k not in ("reference_files", "anchor_files")}
 
-    prompt = f"""You are a Principal Scientific Illustrator & Visual Architect (AIA-Academic-Illustrator × CVPR / NeurIPS / Nature).
-Transform the grounded paper analysis + distilled Style DNA into a razor-clean, physical-object-first **[VISUAL SCHEMA]** (`schema.md`)
-that produces a breathtaking flagship publication illustration in ONE shot.
+    prompt = f"""You are a Principal Scientific Illustrator (AIA-Academic-Illustrator × CVPR / NeurIPS / Nature).
+Convert the grounded paper analysis + Style DNA into a **CRYSTAL-CLEAN, ZERO-OVERLAP, ZERO-SPAGHETTI** `[VISUAL SCHEMA]` (`schema.md`).
 
 {AIA_LAYOUT_SELECTOR_BLOCK}
 
 {aesthetic_block}
 
-=== SELECTED STORY ARCHETYPE ===
-- Key: `{archetype.key}` ({archetype.zh_name} / {archetype.en_name})
-- Canvas Goal: {banner_rule}
+=== SELECTED ARCHETYPE ===
+- `{archetype.key}` ({archetype.zh_name} / {archetype.en_name}) | {banner_rule}
 
-=== DISTILLED STYLE DNA FROM USER'S REFERENCE FOLDER (STYLE ONLY — ZERO CONTENT COPY!) ===
+=== DISTILLED STYLE DNA (STYLE ONLY — ZERO CONTENT COPY!) ===
 ```json
 {json.dumps(style_clean, ensure_ascii=False, indent=2)}
 ```
 
-=== GROUNDED PAPER ANALYSIS (100% SCIENTIFIC TRUTH SOURCE) ===
+=== GROUNDED PAPER ANALYSIS ===
 ```json
 {json.dumps(paper_analysis, ensure_ascii=False, indent=2)}
 ```
 
 === ADDITIONAL MANDATES ===
 - {lang_rule}
-- Define concrete physical/visual objects inside every zone (e.g., 3D optical setup, portrait frames, sleek trapezoid neural network blocks with ❄/🔥 icon, smooth waveform curve, clean 3-frame progression) — NEVER vague boxes!
-- Explicitly specify arrow DIRECTION (`pointing RIGHT`, `pointing DOWN`, `curved loop UP`) for every connection in `[CONNECTIONS]`.
+- Keep `[CONNECTIONS]` minimal and crystal-clear ({conn_cap_hint}). Every arrow MUST connect two named visible objects cleanly with ZERO diagonal spiderwebs and ZERO arrows pointing at floating title text!
 - Keep `[EXACT TEXT INVENTORY]` as the single source of truth ({inv_cap_hint}) using straight ASCII double quotes `"..."`.
 
 OUTPUT FORMAT (clean Markdown directly, NO outer fences):
@@ -116,54 +121,56 @@ OUTPUT FORMAT (clean Markdown directly, NO outer fences):
 
 ## Scientific Grounding & Art Direction (NOT RENDERED)
 - **One-Sentence Story**: <...>
-- **Selected AIA Layout**: <Linear Pipeline / Cyclic Iterative / Dual-Stream / etc.>
-- **Selected Archetype**: `{archetype.key}`
-- **Visual Hero Strategy**: <how physical/optical/3D-block/photographic visuals tell the story in 3 seconds on an open white canvas>
+- **Selected AIA Layout**: <Linear Pipeline / Cyclic Iterative / Dual-Stream>
+- **Visual Clarity Strategy**: <how 6–10 crisp standalone visual islands + 5–7 clean orthogonal arrows tell the entire story in 3 seconds with zero overlap>
 
 ---BEGIN PROMPT---
 
 [STYLE & CANVAS]
 - Canvas: {banner_rule}
-- Aesthetic Craft: <concrete publication illustration style honoring Style DNA — open pure-white canvas, sleek 3D/isometric or clean flat geometric blocks, crisp portraits/specimens, refined restrained palette; ZERO boxy gray PPT forms, ZERO red/yellow header strips, ZERO oval pill clutter>
-- Typography: Clean unified sans-serif (`{font_family}`), bold crisp hierarchy, effortless 2-column print legibility.
-- Palette: <3–5 exact harmonious hex colors from Style DNA with 1-to-1 semantic meanings>
+- Aesthetic Craft: Clean open-white CVPR/Nature scientific illustration with flat/subtle-isometric vector-like clarity, 45–55% pure `#FFFFFF` breathing space, crisp standalone visual islands separated by wide white gaps; ZERO overlapping shapes, ZERO fused 3D-on-card seams, ZERO nested gray PPT boxes, ZERO red/yellow header strips, ZERO oval pills, ZERO crude bar charts.
+- Typography: Clean unified sans-serif (`{font_family}`), bold crisp hierarchy, every text label placed cleanly ABOVE or BELOW its graphic with wide open margin (NEVER touching graphics or arrows; ZERO raw `_` underscores!).
+- Palette: <3–4 exact harmonious hex colors from Style DNA>
 
 [LAYOUT CONFIGURATION]
 - Selected Layout: <chosen AIA topology>
-- Reading Flow & Whitespace: <left-to-right open horizontal visual progression with ~40–50% open `#FFFFFF` space and ZERO nested box cages>
-- Compact Legend (ONLY if frozen/trainable icons are used): <unobtrusive tiny corner cue, e.g. ❄ Frozen  🔥 Trainable>
+- Spatial Grid: <3–4 spacious horizontal columns left-to-right aligned on one clean centerline, with wide white gutters and zero clutter>
+- Legend (ONLY if ❄/🔥 icons are used): <tiny clean corner legend `"❄ Frozen  🔥 Trainable"`>
 
-[ZONE 1: <POSITION - SEMANTIC ROLE>]
-- Framing: <open floating on pure white canvas, OR minimal soft borderless tint zone>
-- Concrete Visual Objects:
-  * <Exact physical/visual object description — e.g., fresh studio portrait of an ordinary young woman with dark hair, 3D binary DMD checkerboard plate + converging lens + photodetector icon, smooth 1D signal waveform>
-- Exact Labels in Zone: "<Label 1>", "<Label 2>"
+[ZONE 1: LEFT — <SEMANTIC ROLE>]
+- Framing: Open on pure `#FFFFFF` canvas (no box border)
+- Standalone Visual Islands (2–3 max, each separated by >=25px white gap):
+  * <Clean standalone visual object>
+- Clean Labels (placed strictly above/below objects): "<Label 1>", "<Label 2>"
 
-[ZONE 2: <POSITION - SEMANTIC ROLE>]
+[ZONE 2: CENTER-LEFT — <SEMANTIC ROLE>]
 ...
 
-(Use 3–4 airy, well-paced zones — visual heroes dominate ~60% of the canvas!)
+(STRICTLY 3–4 airy zones total; MAX 6–10 visual islands across the ENTIRE figure!)
 
 [CONNECTIONS]
-1. "<Source>" -> "<Target>" | <clean arrow style & color, explicit direction: pointing RIGHT / curved loop UP / thin dashed DOWN> | label: "<optional short math symbol or NONE>"
+({conn_cap_hint})
+1. "<Source Object>" -> "<Target Object>" | straight horizontal black 2.5px arrow pointing RIGHT | label: NONE
 2. ...
 
 [EXACT TEXT INVENTORY]
 - "<Exact string 1>"
 - "<Exact string 2>"
-(List EVERY SINGLE visible string allowed — {inv_cap_hint}!)
+({inv_cap_hint})
 
 [HARD CONSTRAINTS]
-- Render ONLY the strings in `[EXACT TEXT INVENTORY]`. NEVER render structural tags ("ZONE 1", "STYLE", "Framing", "EXACT TEXT INVENTORY").
+- Render ONLY the strings in `[EXACT TEXT INVENTORY]`. NEVER render structural tags ("ZONE 1", "STYLE", "Framing", "CONNECTIONS", "EXACT TEXT INVENTORY").
+- ZERO stray arrows, ZERO diagonal crossing spiderwebs, ZERO arrows pointing into empty space or floating title text.
+- ZERO overlapping shapes and ZERO text touching or clipped by any graphic/icon/border.
 - NEVER copy any face, person, hair color, object, logo, or text from reference images.
-- NO nested gray PPT boxes, NO colored card header strips, NO rows of oval pill buttons, NO giant top Training bar, NO crude Excel bar charts.
-- Keep all arrows crisp, unambiguous, and cleanly separated from labels and visuals.
 
 ---END PROMPT---
 ```
 """
 
-    schema_md = client.generate_text(prompt, max_output_tokens=12000, temperature=0.3)
+    base_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "medium")
+    eff = resolve_stage_effort(base_eff, "medium")
+    schema_md = client.generate_text(prompt, max_output_tokens=10000, temperature=0.25, reasoning_effort=eff)
     cleaned = schema_md.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:markdown|md)?\s*", "", cleaned)

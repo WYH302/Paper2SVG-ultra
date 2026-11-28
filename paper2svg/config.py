@@ -26,11 +26,23 @@ ACADEMIC_DEFAULT_FONT_EN = "Inter, Helvetica, Arial, sans-serif"
 ACADEMIC_DEFAULT_FONT_ZH = "Inter, 'Noto Sans SC', 'Microsoft YaHei', Helvetica, Arial, sans-serif"
 
 VALID_REASONING_EFFORTS = {"", "none", "low", "medium", "high", "xhigh"}
+_EFFORT_ORDER = {"": 0, "none": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4}
 VALID_SVG_MODES = {"hybrid_rich", "pure_vector"}
 VALID_DENSITY_MODES = {"auto", "concise", "detailed"}
 VALID_SVG_ENGINES = {"autofigure", "legacy"}
-VALID_SEG_BACKENDS = {"auto", "sam3_local", "sam3_fal", "sam3_roboflow", "vlm_zero_gpu"}
+VALID_SEG_BACKENDS = {"auto", "sam3_local", "sam3_fal", "sam3_roboflow", "cc_zero_gpu", "vlm_zero_gpu"}
 VALID_MATTING_BACKENDS = {"auto", "rmbg2", "birefnet", "floodfill"}
+
+
+def resolve_stage_effort(base_effort: Optional[str], max_cap: str) -> str:
+    """Cap per-stage reasoning effort so fast utility stages (PDF/Style/Gate/Seg) never stall for 10+ minutes."""
+    base = (base_effort or "medium").strip().lower()
+    cap = (max_cap or "medium").strip().lower()
+    if base not in _EFFORT_ORDER:
+        base = "medium"
+    if cap not in _EFFORT_ORDER:
+        cap = "medium"
+    return base if _EFFORT_ORDER[base] <= _EFFORT_ORDER[cap] else cap
 
 
 def resolve_density_mode(density: Optional[str], inventory_count: int = 0) -> str:
@@ -68,7 +80,7 @@ class Settings(BaseModel):
     disable_response_storage: bool = Field(default=True)
 
     # Cut 1 (AIA Stage-4 Aesthetic & Anti-Copy Gate)
-    draft_review_rounds: int = Field(default=2, ge=0, le=3)
+    draft_review_rounds: int = Field(default=1, ge=0, le=3)
 
     # Cut 2 (AutoFigure-Edit native segmentation / matting / 4K upscale)
     seg_backend: str = Field(default="auto")
@@ -81,7 +93,7 @@ class Settings(BaseModel):
     rmbg_model_path: str = Field(default="")
     enable_upscale_4k: bool = Field(default=False)
 
-    critic_rounds: int = Field(default=2, ge=0, le=4)
+    critic_rounds: int = Field(default=1, ge=0, le=4)
     font_family: str = Field(default=ACADEMIC_DEFAULT_FONT_EN)
     canvas_width: int = Field(default=1600)
     canvas_height: int = Field(default=680)  # ~2.35:1 wide banner default
@@ -172,7 +184,7 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
         svg_engine=svg_engine,
         density=density,
         disable_response_storage=_bool("DISABLE_RESPONSE_STORAGE", True),
-        draft_review_rounds=int(os.getenv("DRAFT_REVIEW_ROUNDS", "2")),
+        draft_review_rounds=int(os.getenv("DRAFT_REVIEW_ROUNDS", "1")),
         seg_backend=seg_backend,
         matting_backend=matting_backend,
         sam_prompts=os.getenv("SAM_PROMPTS", "icon,portrait,diagram,chart,object").strip(),
@@ -182,7 +194,7 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
         sam_api_key=sam_api_key,
         rmbg_model_path=os.getenv("RMBG_MODEL_PATH", "").strip(),
         enable_upscale_4k=_bool("ENABLE_UPSCALE_4K", False),
-        critic_rounds=int(os.getenv("DEFAULT_CRITIC_ROUNDS", "2")),
+        critic_rounds=int(os.getenv("DEFAULT_CRITIC_ROUNDS", "1")),
         font_family=sanitize_font_family(os.getenv("DEFAULT_FONT_FAMILY", ACADEMIC_DEFAULT_FONT_EN)),
         canvas_width=int(os.getenv("DEFAULT_CANVAS_WIDTH", "1600")),
         canvas_height=int(os.getenv("DEFAULT_CANVAS_HEIGHT", "680")),
