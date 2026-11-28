@@ -4,27 +4,26 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ============================================================
-echo   Paper2SVG-ultra - 一键生成顶会论文总体框架图 (Editable SVG)
-echo   读取 .env 中的 OpenAI Responses API 模型配置
+echo   Paper2SVG-ultra v3.0 - 纯净 AutoFigure-Edit 可编辑论文图工具
+echo   只抽 Method 章节 + 单风格参考图 -^> 100%% 原生可编辑 SVG
 echo ============================================================
 echo.
 
 :ASK_PDF
 set "PAPER_PDF="
-set /p "PAPER_PDF=【第 1 步】请把你的论文 PDF 文件直接拖进本窗口，然后按回车: "
+set /p "PAPER_PDF=【第 1 步】请把论文 PDF 文件拖进本窗口按回车: "
 set "PAPER_PDF=%PAPER_PDF:"=%"
 if "%PAPER_PDF%"=="" goto ASK_PDF
 if not exist "%PAPER_PDF%" (
     echo [错误] 找不到文件: %PAPER_PDF%
-    echo 请重新拖入有效的 PDF 文件！
     echo.
     goto ASK_PDF
 )
 
 echo.
-set "REFS_DIR="
-set /p "REFS_DIR=【第 2 步】请把参考图文件夹拖进本窗口按回车（直接回车则使用默认顶会风格）: "
-set "REFS_DIR=%REFS_DIR:"=%"
+set "STYLE_REF="
+set /p "STYLE_REF=【第 2 步】请把 1 张顶会风格参考图拖进本窗口按回车（直接回车则零参考图）: "
+set "STYLE_REF=%STYLE_REF:"=%"
 
 echo.
 set "LANG_OPT=auto"
@@ -34,14 +33,14 @@ if /i "%LANG_INPUT%"=="zh" set "LANG_OPT=zh"
 
 echo.
 echo ------------------------------------------------------------
-echo 开始执行 6 阶段顶配出图（全程约 5~8 分钟，请耐心等待）...
+echo 开始执行 Paper2SVG-ultra v3.0（Method 切片 -^> 底图 -^> 可编辑 SVG）...
 echo ------------------------------------------------------------
 echo.
 
-if "%REFS_DIR%"=="" (
+if "%STYLE_REF%"=="" (
     "%~dp0.venv\Scripts\python.exe" "%~dp0run.py" --paper "%PAPER_PDF%" --lang "%LANG_OPT%"
 ) else (
-    "%~dp0.venv\Scripts\python.exe" "%~dp0run.py" --paper "%PAPER_PDF%" --refs "%REFS_DIR%" --lang "%LANG_OPT%"
+    "%~dp0.venv\Scripts\python.exe" "%~dp0run.py" --paper "%PAPER_PDF%" --style-ref "%STYLE_REF%" --lang "%LANG_OPT%"
 )
 
 if %ERRORLEVEL% EQU 0 (

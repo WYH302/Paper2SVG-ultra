@@ -1,4 +1,4 @@
-"""Configuration management for Paper2SVG-ultra v2.0 (AIA Front-End + AutoFigure-Edit Back-End)."""
+"""Configuration management for Paper2SVG-ultra v3.0 (Pure AutoFigure-Edit + Local GPU/Zero-GPU + Deterministic SVG)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Explicitly prohibited non-academic fonts
 BANNED_FONTS = {
     "comic sans ms",
     "comic sans",
@@ -29,13 +28,12 @@ VALID_REASONING_EFFORTS = {"", "none", "low", "medium", "high", "xhigh"}
 _EFFORT_ORDER = {"": 0, "none": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4}
 VALID_SVG_MODES = {"hybrid_rich", "pure_vector"}
 VALID_DENSITY_MODES = {"auto", "concise", "detailed"}
-VALID_SVG_ENGINES = {"autofigure", "legacy"}
-VALID_SEG_BACKENDS = {"auto", "sam3_local", "sam3_fal", "sam3_roboflow", "cc_zero_gpu", "vlm_zero_gpu"}
+VALID_SEG_BACKENDS = {"auto", "sam3_local", "sam3_fal", "sam3_roboflow", "grounding_dino", "cc_zero_gpu"}
 VALID_MATTING_BACKENDS = {"auto", "rmbg2", "birefnet", "floodfill"}
 
 
 def resolve_stage_effort(base_effort: Optional[str], max_cap: str) -> str:
-    """Cap per-stage reasoning effort so fast utility stages (PDF/Style/Gate/Seg) never stall for 10+ minutes."""
+    """Cap per-stage reasoning effort so utility stages stay snappy while SVG synthesis stays thorough."""
     base = (base_effort or "medium").strip().lower()
     cap = (max_cap or "medium").strip().lower()
     if base not in _EFFORT_ORDER:
@@ -46,17 +44,10 @@ def resolve_stage_effort(base_effort: Optional[str], max_cap: str) -> str:
 
 
 def resolve_density_mode(density: Optional[str], inventory_count: int = 0) -> str:
-    """Resolve effective diagram density tier ('concise' vs 'detailed').
-
-    - 'concise': airy CVPR/Nature/NeurIPS single-strip overview (<= 30 labels, larger print floor)
-    - 'detailed': dense multi-panel IEEE S&P / USENIX / OSDI systems architecture (> 30 labels)
-    - 'auto': automatically selects 'detailed' when exact_text_inventory has > 30 labels, else 'concise'
-    """
+    """Resolve diagram density tier ('concise' vs 'detailed') for soft print-legibility hints."""
     mode = (density or "auto").strip().lower()
-    if mode == "concise":
-        return "concise"
-    if mode == "detailed":
-        return "detailed"
+    if mode in ("concise", "detailed"):
+        return mode
     return "detailed" if inventory_count > 30 else "concise"
 
 
@@ -67,37 +58,30 @@ class Settings(BaseModel):
 
     main_model: str = Field(default="gpt-5.4")
     reasoning_effort: str = Field(default="high")
-    # Image model passed to Responses `image_generation` tool; empty = endpoint default
     image_tool_model: str = Field(default="")
     image_quality: str = Field(default="high")
     image_size: str = Field(default="1536x1024")
-    # 'hybrid_rich' (editable vector cards/text/arrows + crisp embedded visual assets) or 'pure_vector'
-    svg_mode: str = Field(default="hybrid_rich")
-    # 'autofigure' (v2.0 true AutoFigure-Edit <AF>01 template -> optimize -> icon swap engine) or 'legacy'
-    svg_engine: str = Field(default="autofigure")
-    # 'auto' (adaptive from label inventory), 'concise' (airy <=30 labels), or 'detailed' (dense systems diagram)
-    density: str = Field(default="auto")
     disable_response_storage: bool = Field(default=True)
 
-    # Cut 1 (AIA Stage-4 Aesthetic & Anti-Copy Gate)
-    draft_review_rounds: int = Field(default=1, ge=0, le=3)
+    # Pure AutoFigure-Edit v3.0 SVG settings
+    svg_mode: str = Field(default="hybrid_rich")
+    density: str = Field(default="auto")
+    optimize_iterations: int = Field(default=2, ge=0, le=4)
+    font_family: str = Field(default=ACADEMIC_DEFAULT_FONT_EN)
+    lang: str = Field(default="auto")
 
-    # Cut 2 (AutoFigure-Edit native segmentation / matting / 4K upscale)
+    # Pluggable Step 2 (SAM3 / Local GPU GroundingDINO / Zero-GPU CC) & Step 3 (RMBG-2.0 / BiRefNet / FloodFill)
     seg_backend: str = Field(default="auto")
     matting_backend: str = Field(default="auto")
-    sam_prompts: str = Field(default="icon,portrait,diagram,chart,object")
+    gpu_python: str = Field(default="")
+    hf_endpoint: str = Field(default="")
+    sam_prompts: str = Field(default="icon,person,robot,animal,diagram,chart")
     sam_min_score: float = Field(default=0.45, ge=0.05, le=0.95)
-    sam_merge_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    sam_merge_threshold: float = Field(default=0.80, ge=0.0, le=1.0)
     sam_max_masks: int = Field(default=32, ge=1, le=64)
     sam_api_key: str = Field(default="")
     rmbg_model_path: str = Field(default="")
     enable_upscale_4k: bool = Field(default=False)
-
-    critic_rounds: int = Field(default=1, ge=0, le=4)
-    font_family: str = Field(default=ACADEMIC_DEFAULT_FONT_EN)
-    canvas_width: int = Field(default=1600)
-    canvas_height: int = Field(default=680)  # ~2.35:1 wide banner default
-    lang: str = Field(default="auto")  # auto | en | zh
 
     timeout_seconds: float = Field(default=600.0)
     max_retries: int = Field(default=5)
@@ -117,7 +101,7 @@ class Settings(BaseModel):
 
 
 def sanitize_font_family(font_family: Optional[str], lang: str = "en") -> str:
-    """Enforce academic sans-serif typography and block non-academic fonts like Comic Sans MS."""
+    """Enforce clean academic typography and block novelty fonts such as Comic Sans MS."""
     fallback = ACADEMIC_DEFAULT_FONT_ZH if lang == "zh" else ACADEMIC_DEFAULT_FONT_EN
     if not font_family or not font_family.strip():
         return fallback
@@ -129,7 +113,7 @@ def sanitize_font_family(font_family: Optional[str], lang: str = "en") -> str:
 
 
 def load_settings(env_path: Optional[Path] = None) -> Settings:
-    """Load settings from .env file and environment variables."""
+    """Load settings from `.env` and environment variables."""
     target_env = env_path or (PROJECT_ROOT / ".env")
     if target_env.is_file():
         load_dotenv(target_env, override=False)
@@ -147,10 +131,6 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
     svg_mode = os.getenv("SVG_MODE", "hybrid_rich").strip().lower()
     if svg_mode not in VALID_SVG_MODES:
         svg_mode = "hybrid_rich"
-
-    svg_engine = os.getenv("SVG_ENGINE", "autofigure").strip().lower()
-    if svg_engine not in VALID_SVG_ENGINES:
-        svg_engine = "autofigure"
 
     density = os.getenv("DEFAULT_DENSITY", "auto").strip().lower()
     if density not in VALID_DENSITY_MODES:
@@ -171,6 +151,12 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
         or ""
     ).strip()
 
+    opt_iters_raw = os.getenv("OPTIMIZE_ITERATIONS") or os.getenv("DEFAULT_CRITIC_ROUNDS") or "2"
+    try:
+        opt_iters = max(0, min(4, int(opt_iters_raw)))
+    except ValueError:
+        opt_iters = 2
+
     return Settings(
         base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
         api_key=os.getenv("OPENAI_API_KEY", "").strip(),
@@ -180,25 +166,23 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
         image_tool_model=os.getenv("IMAGE_TOOL_MODEL", "").strip(),
         image_quality=os.getenv("IMAGE_QUALITY", "high").strip(),
         image_size=os.getenv("IMAGE_SIZE", "1536x1024").strip(),
-        svg_mode=svg_mode,
-        svg_engine=svg_engine,
-        density=density,
         disable_response_storage=_bool("DISABLE_RESPONSE_STORAGE", True),
-        draft_review_rounds=int(os.getenv("DRAFT_REVIEW_ROUNDS", "1")),
+        svg_mode=svg_mode,
+        density=density,
+        optimize_iterations=opt_iters,
+        font_family=sanitize_font_family(os.getenv("DEFAULT_FONT_FAMILY", ACADEMIC_DEFAULT_FONT_EN)),
+        lang=os.getenv("DEFAULT_LANG", "auto").strip().lower(),
         seg_backend=seg_backend,
         matting_backend=matting_backend,
-        sam_prompts=os.getenv("SAM_PROMPTS", "icon,portrait,diagram,chart,object").strip(),
+        gpu_python=os.getenv("GPU_PYTHON", "").strip(),
+        hf_endpoint=os.getenv("HF_ENDPOINT", "").strip(),
+        sam_prompts=os.getenv("SAM_PROMPTS", "icon,person,robot,animal,diagram,chart").strip(),
         sam_min_score=float(os.getenv("SAM_MIN_SCORE", "0.45")),
-        sam_merge_threshold=float(os.getenv("SAM_MERGE_THRESHOLD", "0.85")),
+        sam_merge_threshold=float(os.getenv("SAM_MERGE_THRESHOLD", "0.80")),
         sam_max_masks=int(os.getenv("SAM_MAX_MASKS", "32")),
         sam_api_key=sam_api_key,
         rmbg_model_path=os.getenv("RMBG_MODEL_PATH", "").strip(),
         enable_upscale_4k=_bool("ENABLE_UPSCALE_4K", False),
-        critic_rounds=int(os.getenv("DEFAULT_CRITIC_ROUNDS", "1")),
-        font_family=sanitize_font_family(os.getenv("DEFAULT_FONT_FAMILY", ACADEMIC_DEFAULT_FONT_EN)),
-        canvas_width=int(os.getenv("DEFAULT_CANVAS_WIDTH", "1600")),
-        canvas_height=int(os.getenv("DEFAULT_CANVAS_HEIGHT", "680")),
-        lang=os.getenv("DEFAULT_LANG", "auto").strip().lower(),
         timeout_seconds=float(os.getenv("API_TIMEOUT_SECONDS", "600")),
         max_retries=int(os.getenv("API_MAX_RETRIES", "5")),
         server_host=os.getenv("SERVER_HOST", "127.0.0.1").strip(),

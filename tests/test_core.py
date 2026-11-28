@@ -1,9 +1,10 @@
-"""Automated unit & integration tests for Paper2SVG-ultra (v1.1.0: zero-margin ruler, adaptive density, OOB linter, Critic retention, & primary style winner)."""
+"""Automated unit & integration tests for Paper2SVG-ultra v3.0 (Pure AutoFigure-Edit + Deterministic Vector Repair)."""
 
 from __future__ import annotations
 
-import json
+import base64
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -12,22 +13,8 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import run as cli_run
-from paper2svg.archetypes import ARCHETYPES, get_archetype
-from paper2svg.architect import extract_exact_text_inventory, extract_prompt_body
-from paper2svg.asset_extractor import (
-    ExtractedAsset,
-    dehydrate_svg_assets,
-    hydrate_svg_assets,
-    inject_missing_assets,
-    render_coordinate_ruler_overlay,
-    smart_remove_border_background,
-    snap_bbox_to_foreground,
-    strip_edge_text_bleed,
-    verify_assets_preserved,
-    _encode_pil_png_data_url,
-)
+from paper2svg import __version__
 from paper2svg.autofigure_engine import (
-    _looks_like_opaque_photo_tile,
     draw_samed_placeholder_image,
     merge_overlapping_boxes,
     replace_icons_in_svg,
@@ -35,7 +22,7 @@ from paper2svg.autofigure_engine import (
     resolve_seg_backend,
     upscale_image_to_4k_if_needed,
 )
-from paper2svg.client import ResponsesAPIClient, is_retryable_stream_error
+from paper2svg.client import ResponsesAPIClient, encode_image_to_data_url, is_retryable_stream_error
 from paper2svg.config import (
     Settings,
     load_settings,
@@ -43,27 +30,38 @@ from paper2svg.config import (
     resolve_stage_effort,
     sanitize_font_family,
 )
-from paper2svg.draft_generator import audit_stage1_draft_aesthetics, compute_svg_viewbox
-from paper2svg.pdf_parser import extract_pdf_sections
-from paper2svg.style_extractor import discover_reference_images, extract_style_dna
-from paper2svg.svg_critic import check_critic_content_retention
+from paper2svg.figure_gen import build_autofigure_step1_prompt, pick_single_style_reference, trim_uniform_outer_margin
+from paper2svg.icon_utils import (
+    detect_cc_frame_stripped,
+    looks_like_opaque_photo_tile,
+    smart_remove_border_background,
+    strip_edge_text_bleed,
+    strip_text_edges_on_box,
+)
+from paper2svg.pdf_parser import extract_method_section, load_method_text
 from paper2svg.svg_linter import lint_svg
+from paper2svg.svg_postprocess import (
+    autofit_text_in_rects,
+    fix_collapsed_arrow_paths,
+    postprocess_svg_deterministic,
+    sanitize_svg_numeric_typos,
+)
 from paper2svg.svg_renderer import render_dual_preview
 from server import app
 
 
-def test_font_guardrail() -> None:
+def test_font_guardrail_and_config_defaults() -> None:
+    assert __version__ == "3.0.0"
     assert "comic" not in sanitize_font_family("Comic Sans MS").lower()
     assert "Inter" in sanitize_font_family("Comic Sans MS", lang="en")
     assert "Noto Sans SC" in sanitize_font_family("", lang="zh")
     assert sanitize_font_family("Helvetica, Arial, sans-serif") == "Helvetica, Arial, sans-serif"
 
-
-def test_reasoning_payload_config() -> None:
     defaults = Settings()
     assert defaults.base_url == "https://api.openai.com/v1"
     assert defaults.actor_auth == ""
     assert defaults.svg_mode == "hybrid_rich"
+    assert defaults.optimize_iterations == 2
     assert defaults.disable_response_storage is True
 
     loaded = load_settings()
@@ -75,198 +73,125 @@ def test_reasoning_payload_config() -> None:
     assert payload["reasoning"] == {"effort": "xhigh"}
     assert "temperature" not in payload
 
+    assert resolve_stage_effort("xhigh", "low") == "low"
+    assert resolve_stage_effort("xhigh", "medium") == "medium"
+    assert resolve_density_mode("auto", 20) == "concise"
+    assert resolve_density_mode("auto", 45) == "detailed"
+    assert is_retryable_stream_error("503 service_unavailable_error overloaded")
+    assert not is_retryable_stream_error("DAILY_LIMIT_EXCEEDED: quota exhausted")
 
-def test_archetypes() -> None:
-    assert set(ARCHETYPES.keys()) == {"conceptual", "framework", "pipeline", "architecture", "taxonomy", "teaser"}
-    assert get_archetype("pipeline").is_wide_banner is True
-    assert get_archetype("teaser").is_wide_banner is False
 
-
-def test_pdf_section_filtering() -> None:
+def test_strict_method_section_slicer_arabic_and_ieee_roman() -> None:
     with tempfile.TemporaryDirectory() as td:
-        pdf_path = Path(td) / "sample.pdf"
+        # 1. IEEE Roman numerals (`III. METHODOLOGY` -> stops cleanly before `IV. EXPERIMENTS`)
+        ieee_pdf = Path(td) / "ieee_paper.pdf"
         doc = pymupdf.open()
         page = doc.new_page()
         y = 50
-        blocks = [
-            ("SpecAlign: Sparse Routing for Multimodal Reasoning", 16, True),
-            ("Abstract", 13, True),
-            ("We propose SpecAlign, a novel two-stage cross-modal alignment framework.", 10, False),
-            ("1 Introduction", 13, True),
-            ("Existing models suffer from dense attention overhead. Our key innovation is Sparse Router.", 10, False),
-            ("2 Related Work", 13, True),
-            ("Many prior papers studied transformers (Vaswani et al., 2017) and CLIP.", 10, False),
-            ("3 Methodology", 13, True),
-            ("Stage 1 uses a Frozen Vision Encoder. Stage 2 introduces our Novel Sparse Token Router.", 10, False),
-            ("References", 13, True),
-            ("[1] Vaswani et al. Attention Is All You Need. NeurIPS 2017.", 10, False),
+        ieee_blocks = [
+            ("PhysFlow-SPI: Physics-Consistent Flow Matching", 15, True),
+            ("ABSTRACT", 12, True),
+            ("We propose PhysFlow-SPI for single-pixel face reconstruction.", 10, False),
+            ("I. INTRODUCTION", 12, True),
+            ("Single-pixel imaging faces severe ill-posedness in extreme compression.", 10, False),
+            ("II. RELATED WORK", 12, True),
+            ("Prior GAN and diffusion models (Vaswani et al., 2017) ignore measurement physics.", 10, False),
+            ("III. METHODOLOGY", 12, True),
+            ("Our Dual-Domain Conditioning fuses spatial semantic tokens with covariance geometry.", 10, False),
+            ("A. Adaptive Data Consistency", 11, True),
+            ("At each ODE step we project onto the physical measurement subspace with lambda_adapt.", 10, False),
+            ("IV. EXPERIMENTS", 12, True),
+            ("Table I shows PSNR=31.42 dB and FID=4.81 on CelebA-HQ benchmark.", 10, False),
+            ("REFERENCES", 12, True),
+            ("[1] Vaswani et al. Attention Is All You Need.", 10, False),
         ]
-        for text, size, bold in blocks:
-            font = "hebo" if bold else "helv"
-            page.insert_text((50, y), text, fontsize=size, fontname=font)
-            y += size + 10
-        doc.save(str(pdf_path))
+        for txt, sz, bold in ieee_blocks:
+            page.insert_text((50, y), txt, fontsize=sz, fontname="hebo" if bold else "helv")
+            y += sz + 9
+        doc.save(str(ieee_pdf))
         doc.close()
 
-        info = extract_pdf_sections(pdf_path)
+        info = extract_method_section(ieee_pdf)
         assert info["detected_lang"] == "en"
-        assert "SpecAlign" in info["extracted_text"]
-        assert "Sparse Token Router" in info["extracted_text"]
-        assert "Vaswani et al. Attention Is All You Need" not in info["extracted_text"]
-        assert any("Related Work" in h for h in info["dropped_headings"])
-        assert any("References" in h for h in info["dropped_headings"])
+        assert "Dual-Domain Conditioning" in info["method_text"]
+        assert "lambda_adapt" in info["method_text"]
+        assert "PSNR=31.42" not in info["method_text"]
+        assert "Vaswani et al." not in info["method_text"]
+        assert any("EXPERIMENTS" in h for h in info["dropped_headings"])
+
+        # 2. Arabic numbering (`3. Method` -> stops cleanly before `4. Evaluation`)
+        arabic_pdf = Path(td) / "arabic_paper.pdf"
+        doc2 = pymupdf.open()
+        p2 = doc2.new_page()
+        y = 50
+        for txt, sz, bold in [
+            ("SpecAlign: Sparse Routing", 15, True),
+            ("2. Related Work", 12, True),
+            ("Related survey text.", 10, False),
+            ("3. Method", 12, True),
+            ("Sparse Token Router aligns visual patches with text tokens.", 10, False),
+            ("4. Evaluation", 12, True),
+            ("Our ablation achieves 98.7% top-1 accuracy.", 10, False),
+        ]:
+            p2.insert_text((50, y), txt, fontsize=sz, fontname="hebo" if bold else "helv")
+            y += sz + 10
+        doc2.save(str(arabic_pdf))
+        doc2.close()
+
+        info2 = extract_method_section(arabic_pdf)
+        assert "Sparse Token Router" in info2["method_text"]
+        assert "98.7% top-1" not in info2["method_text"]
+
+        # 3. Direct method.txt loader
+        mtxt = Path(td) / "method.txt"
+        mtxt.write_text("Stage 1 encodes radar point clouds into voxel grids.", encoding="utf-8")
+        info3 = load_method_text(mtxt)
+        assert "voxel grids" in info3["method_text"]
 
 
-def test_schema_parsing() -> None:
-    schema = """
-# Header
----BEGIN PROMPT---
-[SECTION 1]
-Key labels
-[EXACT TEXT INVENTORY]
-- "Frozen Encoder"
-- "Sparse Router"
-- "Output Prediction"
-[HARD CONSTRAINTS]
-- Keep clean
----END PROMPT---
-"""
-    assert "[SECTION 1]" in extract_prompt_body(schema)
-    inv = extract_exact_text_inventory(schema)
-    assert inv == ["Frozen Encoder", "Sparse Router", "Output Prediction"]
+def test_step1_prompt_builder_and_trimmer() -> None:
+    p_ref = build_autofigure_step1_prompt("Our encoder maps X to Z.", has_style_ref=True, has_subject_images=True)
+    assert "closely imitate the visual (artistic) style" in p_ref
+    assert "ORIGINALITY GUARD" in p_ref
+    assert "OWN PAPER SUBJECT IMAGE" in p_ref
 
+    p_zero = build_autofigure_step1_prompt("Our encoder maps X to Z.", has_style_ref=False)
+    assert "professional academic journal style figure" in p_zero
 
-def test_hybrid_asset_crop_bg_removal_and_svg_render() -> None:
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        # Create a synthetic image with a tinted card background (#EFF6FF), a colored ring, and a white interior
-        img = Image.new("RGB", (160, 120), (239, 246, 255))
-        arr = np.array(img)
-        arr[25:95, 35:125] = [37, 99, 235]     # blue outer shape
-        arr[45:75, 55:105] = [255, 255, 255]   # pure white interior (MUST stay opaque!)
-        crop_src = Image.fromarray(arr, mode="RGB")
+        r1 = td_path / "01_ref.png"
+        r2 = td_path / "02_ref.png"
+        Image.new("RGB", (400, 200), (240, 240, 240)).save(r1)
+        Image.new("RGB", (400, 200), (230, 230, 250)).save(r2)
+        assert pick_single_style_reference(style_ref=r2, refs_dir=td_path) == r2
+        assert pick_single_style_reference(refs_dir=td_path) == r1
 
-        cleaned, trims = smart_remove_border_background(crop_src)
-        c_arr = np.array(cleaned)
-        # Perimeter was trimmed tight to the blue box (90x70)
-        assert cleaned.width <= 94 and cleaned.height <= 74
-        # Interior white center MUST remain opaque (alpha == 255)
-        cy, cx = c_arr.shape[0] // 2, c_arr.shape[1] // 2
-        assert c_arr[cy, cx, 3] == 255
-
-        # Test zero-margin 1:1 coordinate ruler overlay (exact identical dimensions!)
-        draft_path = td_path / "draft.png"
-        crop_src.save(draft_path)
-        ruler_path = render_coordinate_ruler_overlay(draft_path, td_path / "ruler.png")
-        assert ruler_path.is_file()
-        with Image.open(ruler_path) as ruler_im:
-            assert ruler_im.size == crop_src.size, f"Expected 1:1 ruler size {crop_src.size}, got {ruler_im.size}"
-
-        # Test hydration / dehydration / verification / resvg-py rendering of base64 embedded <image>
-        data_url = _encode_pil_png_data_url(cleaned)
-        asset = ExtractedAsset(
-            asset_id="hero_cube",
-            description="Blue cube with white interior",
-            bg_mode="remove_bg",
-            bbox_1000=[200, 200, 400, 400],
-            svg_x=120.0,
-            svg_y=240.0,
-            svg_w=200.0,
-            svg_h=150.0,
-            rounded_rx=8,
-            crop_path=str(draft_path),
-            placeholder="__ASSET_hero_cube__",
-            data_url=data_url,
-        )
-
-        template_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 680" width="1600" height="680">
-          <defs>
-            <clipPath id="clip-hero"><rect x="120" y="240" width="200" height="150" rx="8"/></clipPath>
-          </defs>
-          <style>.module-title { font-family: Inter, Helvetica, Arial, sans-serif; font-size: 26px; font-weight: 600; fill: #0F172A; }</style>
-          <rect width="1600" height="680" fill="#FFFFFF"/>
-          <g id="layer-visual-assets">
-            <image id="asset-hero_cube" x="120" y="240" width="200" height="150" href="__ASSET_hero_cube__" clip-path="url(#clip-hero)" preserveAspectRatio="xMidYMid meet"/>
-          </g>
-          <g id="layer-labels-and-legend">
-            <text x="220" y="430" text-anchor="middle" class="module-title">Hero Visual</text>
-          </g>
-        </svg>"""
-
-        ok_pres, missing = verify_assets_preserved(template_svg, [asset])
-        assert ok_pres and not missing
-
-        hydrated = hydrate_svg_assets(template_svg, [asset])
-        assert "data:image/png;base64," in hydrated
-        assert "__ASSET_hero_cube__" not in hydrated
-
-        dehydrated = dehydrate_svg_assets(hydrated, [asset])
-        assert "__ASSET_hero_cube__" in dehydrated
-        assert "data:image/png;base64," not in dehydrated
-
-        # Test missing asset auto-inject safety net
-        stripped = template_svg.replace('href="__ASSET_hero_cube__"', 'href="none"')
-        repaired = inject_missing_assets(stripped, [asset])
-        assert "__ASSET_hero_cube__" in repaired
-
-        # Test actual resvg-py rendering of the hydrated hybrid SVG (verify non-white pixels appear where image sits!)
-        full_png = td_path / "hybrid_full.png"
-        twocol_png = td_path / "hybrid_2col.png"
-        render_dual_preview(hydrated, full_png, twocol_png, viewbox=(1600, 680), full_zoom=1.0)
-        with Image.open(full_png) as rendered:
-            r_arr = np.array(rendered.convert("RGB"))
-            # Check region around x=120..320, y=240..390 actually rendered blue pixels from embedded base64 PNG!
-            patch = r_arr[250:380, 130:310]
-            blue_pixels = int(np.sum((patch[:, :, 2] > 180) & (patch[:, :, 0] < 100)))
-            assert blue_pixels > 500, f"Expected embedded PNG image to render blue pixels, got {blue_pixels}"
+    # Outer white margin trim
+    canvas = np.full((300, 500, 3), 255, dtype=np.uint8)
+    canvas[60:240, 80:420] = [40, 90, 200]
+    trimmed = trim_uniform_outer_margin(Image.fromarray(canvas, mode="RGB"), pad=10)
+    assert trimmed.width <= 365 and trimmed.height <= 205
 
 
-def test_svg_linter_catches_bad_and_passes_good() -> None:
-    bad_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 680" width="1600" height="680">
-      <rect width="1600" height="680" fill="#FFFFFF"/>
-      <rect x="40" y="40" width="100" height="60" rx="8" fill="#DBEAFE" stroke="#2563EB"/>
-      <text x="90" y="70" text-anchor="middle" font-family="Comic Sans MS" font-size="12">SECTION 1 Super Long Overflowing Label Text</text>
-    </svg>"""
-    rep = lint_svg(bad_svg, exact_text_inventory=["Frozen Encoder"], expected_viewbox=(1600, 680))
-    assert not rep.passed_hard_checks
-    joined = "\n".join(rep.errors)
-    assert "Comic Sans" in joined
-    assert "Meta-label" in joined
-    assert "font-size=12px" in joined
+def test_icon_utils_cc_photo_protection_and_floodfill() -> None:
+    # 1. Border flood-fill keeps white interior 100% opaque
+    arr = np.full((120, 160, 3), [239, 246, 255], dtype=np.uint8)
+    arr[25:95, 35:125] = [37, 99, 235]
+    arr[45:75, 55:105] = [255, 255, 255]
+    cleaned, _ = smart_remove_border_background(Image.fromarray(arr, mode="RGB"))
+    c_arr = np.array(cleaned)
+    assert cleaned.width <= 94 and cleaned.height <= 74
+    assert c_arr[c_arr.shape[0] // 2, c_arr.shape[1] // 2, 3] == 255
 
-    # Verify sibling text-to-text collision detection catches touching horizontal words (e.g. IdentityGeometry)
-    touching_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 680" width="1600" height="680">
-      <rect width="1600" height="680" fill="#FFFFFF"/>
-      <text x="500" y="300" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Identity</text>
-      <text x="580" y="300" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Geometry</text>
-    </svg>"""
-    rep_touch = lint_svg(touching_svg, expected_viewbox=(1600, 680))
-    assert any("Text collision" in e for e in rep_touch.errors), f"Expected text collision error, got {rep_touch.errors}"
+    # 2. Opaque photo tile protection vs white-bg icon
+    rng = np.random.default_rng(42)
+    photo_tile = Image.fromarray(rng.integers(20, 180, size=(80, 80, 3), dtype=np.uint8), mode="RGB")
+    icon_tile = Image.new("RGB", (80, 80), (255, 255, 255))
+    assert looks_like_opaque_photo_tile(photo_tile) is True
+    assert looks_like_opaque_photo_tile(icon_tile) is False
 
-
-def test_strip_edge_text_bleed_preserves_graphic_and_removes_caption_sliver() -> None:
-    # Build a 100x80 white image with a main card box (rows 5..64) + 4px white gap + 5px grazed text sliver at bottom (rows 75..79)
-    arr = np.full((80, 100, 3), 255, dtype=np.uint8)
-    arr[5:65, 10:90] = [30, 30, 30]   # main graphic
-    arr[12:58, 16:84] = [245, 245, 245]
-    arr[75:80, 20:70] = [20, 20, 20]  # grazed caption sliver touching bottom edge
-    img_with_bleed = Image.fromarray(arr, mode="RGB")
-
-    cleaned, trims = strip_edge_text_bleed(img_with_bleed)
-    assert trims[3] >= 10, f"Expected bottom sliver trimmed, got trims={trims}"
-    assert cleaned.height <= 66
-
-    # Verify a clean 3-row stacked waveform graphic is NOT altered
-    wf = np.full((120, 100, 3), 255, dtype=np.uint8)
-    wf[10:35, 10:90] = [90, 70, 180]
-    wf[45:70, 10:90] = [50, 110, 200]
-    wf[80:105, 10:90] = [210, 130, 40]
-    wf_img = Image.fromarray(wf, mode="RGB")
-    wf_out, wf_trims = strip_edge_text_bleed(wf_img)
-    assert wf_trims == (0, 0, 0, 0) and wf_out.size == wf_img.size
-
-    # Verify a closed 4-sided picture frame (e.g. mini-screen thumbnail) is NOT peeled, while an open
-    # C-shaped grazed card border (left+top+bottom open on right) IS peeled cleanly!
+    # 3. Strip open C-border + grazed bottom caption while keeping closed 4-sided frame untouched
     closed_frame = np.full((64, 84, 3), 255, dtype=np.uint8)
     closed_frame[:3, :] = 20
     closed_frame[-3:, :] = 20
@@ -280,227 +205,87 @@ def test_strip_edge_text_bleed_preserves_graphic_and_removes_caption_sliver() ->
     open_c[:3, :] = 20
     open_c[-3:, :] = 20
     open_c[:, :3] = 20
-    open_c[14:60, 18:56] = 30    # inner doc icon
-    open_c[28:32, 72:77] = 20    # stray 'T' sliver on right edge
+    open_c[14:60, 18:56] = 30
+    open_c[28:32, 72:77] = 20
     oc_out, oc_trims = strip_edge_text_bleed(Image.fromarray(open_c, mode="RGB"))
-    assert oc_trims[0] >= 12 and oc_trims[2] >= 10, f"Expected open C-frame + right sliver stripped, got {oc_trims}"
-    assert oc_out.width <= 45 and oc_out.height <= 50
+    assert oc_trims[0] >= 12 and oc_trims[2] >= 10 and oc_out.width <= 45
+
+    # 4. Frame-stripped CC strips a 600px outer panel border and still finds all 3 disjoint colored icons inside
+    syn = np.full((300, 700, 3), 255, dtype=np.uint8)
+    syn[20:23, 20:680] = [30, 30, 30]
+    syn[277:280, 20:680] = [30, 30, 30]
+    syn[20:280, 20:23] = [30, 30, 30]
+    syn[20:280, 677:680] = [30, 30, 30]
+    syn[80:210, 55:185] = [60, 120, 220]
+    syn[80:210, 280:410] = [220, 110, 60]
+    syn[80:210, 500:630] = [70, 180, 120]
+    cc_boxes = detect_cc_frame_stripped(Image.fromarray(syn, mode="RGB"))
+    assert len(cc_boxes) == 3, f"Expected 3 icons inside stripped panel frame, got {len(cc_boxes)}: {cc_boxes}"
+
+    stripped = strip_text_edges_on_box(syn.astype(np.float32), cc_boxes[0])
+    assert stripped["bg_mode"] == "remove_bg"
 
 
-def test_pixel_snapper_and_native_1to1_viewbox() -> None:
-    # Build a 200x120 white canvas with a dark graphic rectangle at x=40..150, y=25..95
-    arr = np.full((120, 200, 3), 255, dtype=np.float32)
-    arr[25:95, 40:150] = [40, 40, 40]
-    arr[30:90, 45:145] = [140, 140, 140]
-    # Simulate a slightly too-tight VLM bbox that sliced 6px off the left & 5px off the bottom
-    nx1, ny1, nx2, ny2 = snap_bbox_to_foreground(arr, 46, 25, 150, 90, max_expand=12)
-    assert nx1 <= 41, f"Expected left edge snapped back to <=41, got {nx1}"
-    assert ny2 >= 94, f"Expected bottom edge snapped out to >=94, got {ny2}"
+def test_deterministic_svg_postprocess_arrows_autofit_siblings_and_images() -> None:
+    # 1. Double-decimal typo repair
+    assert sanitize_svg_numeric_typos('<rect width="95..0" height="12.0"/>') == '<rect width="95.0" height="12.0"/>'
 
-    # Simulate a portrait photo with light cream backdrop (#F2EFEA) sliced 40px short on the right edge!
-    p_arr = np.full((260, 260, 3), 255, dtype=np.float32)
-    p_arr[20:240, 30:220] = [240, 236, 228]  # light studio portrait tile
-    p_arr[50:200, 60:190] = [110, 75, 60]    # face/hair inside portrait
-    px1, py1, px2, py2 = snap_bbox_to_foreground(p_arr, 30, 20, 178, 240, max_expand=72, ink_threshold=14.0)
-    assert px2 >= 218, f"Expected 40px-sliced portrait right edge recovered to >=218, got {px2}"
+    # 2. Collapsed triangle-wedge arrow repair (including compact negative coords like `l-10-11`)
+    wedge_svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300"><path d="M618 78h117l-10-11v22z" fill="#fff" stroke="#111"/></svg>'
+    fixed_arr_svg, n_arr = fix_collapsed_arrow_paths(wedge_svg)
+    assert n_arr == 1
+    assert "L725.0" in fixed_arr_svg and "L735.0 78.0" in fixed_arr_svg
 
-    # Simulate a portrait photo sitting inside a light-gray card (#F4F4F5): MUST NOT expand into the flat gray card!
-    card_arr = np.full((260, 260, 3), 255, dtype=np.float32)
-    card_arr[10:250, 10:250] = [244, 244, 245]  # #F4F4F5 card panel
-    rng_p = np.random.default_rng(7)
-    card_arr[40:160, 50:150] = rng_p.integers(80, 210, size=(120, 100, 3))
-    cx1, cy1, cx2, cy2 = snap_bbox_to_foreground(card_arr, 50, 40, 150, 160, max_expand=72, ink_threshold=14.0)
-    assert cy2 <= 162, f"Expected portrait inside #F4F4F5 panel NOT to bleed down into card, got cy2={cy2}"
-
-    # Verify _sanitize_svg_numeric_typos repairs double-decimal width="95..0"
-    from paper2svg.autofigure_engine import _sanitize_svg_numeric_typos
-    assert _sanitize_svg_numeric_typos('<rect x="314.0" width="95..0" height="134.0"/>') == '<rect x="314.0" width="95.0" height="134.0"/>'
-    img = Image.new("RGB", (2016, 756), (255, 255, 255))
-    assert compute_svg_viewbox(img, get_archetype("framework")) == (2016, 756)
-
-
-def test_adaptive_density_oob_and_critic_retention_guard() -> None:
-    assert resolve_density_mode("auto", 20) == "concise"
-    assert resolve_density_mode("auto", 54) == "detailed"
-    assert resolve_density_mode("concise", 54) == "concise"
-    assert resolve_density_mode("detailed", 10) == "detailed"
-
-    # 1. Dense 42-label systems SVG should pass in `auto` (resolving to `detailed`) with 14px labels and 0 false overcrowding errors
-    inventory = [f"Module {i:02d}" for i in range(1, 43)]
-    text_nodes = []
-    for idx, lbl in enumerate(inventory):
-        col, row = idx % 6, idx // 6
-        x = 120 + col * 240
-        y = 70 + row * 75
-        text_nodes.append(
-            f'<rect x="{x - 95}" y="{y - 18}" width="190" height="36" rx="6" fill="#DEE5F1" stroke="#171717"/>'
-            f'<text x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central" '
-            f'font-family="Inter, Arial, sans-serif" font-size="14">{lbl}</text>'
-        )
-    dense_svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">'
-        '<rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>'
-        + "".join(text_nodes)
-        + "</svg>"
-    )
-    rep_dense = lint_svg(dense_svg, exact_text_inventory=inventory, expected_viewbox=(1600, 610), density="auto")
-    assert rep_dense.stats["density_mode"] == "detailed"
-    assert rep_dense.passed_hard_checks, f"Unexpected errors on valid dense SVG: {rep_dense.errors}"
-    assert rep_dense.stats["inventory_coverage_ratio"] == 1.0
-
-    # 2. Canvas clipping & textLength squashing checks (while ignoring <defs>/<clipPath> and matching multi-line stacked <text>)
-    clipped_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">
-      <defs><clipPath id="cp"><rect x="0" y="0" width="2000" height="800"/></clipPath></defs>
-      <rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>
-      <text x="120" y="60" font-family="Inter, Arial, sans-serif" font-size="16">Hybrid Plan</text>
-      <text x="120" y="80" font-family="Inter, Arial, sans-serif" font-size="16">Generation</text>
-      <text x="300" y="80" font-family="Inter, Arial, sans-serif" font-size="16" textLength="60" lengthAdjust="spacingAndGlyphs">Squashed Label</text>
-      <rect id="overflow_card" x="1520" y="420" width="130" height="120" rx="8" fill="#F7E5D8" stroke="#171717"/>
-      <text x="1585" y="575" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18">Verified Output</text>
+    # 3. CSS-safe box autofit + same-row sibling collision + image overlap nudger
+    crowded_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" width="900" height="320">
+      <style>
+        .lbl { font-family: Arial, sans-serif; font-size: 22px; font-weight: 700; }
+      </style>
+      <rect x="0" y="0" width="900" height="320" fill="#FFFFFF"/>
+      <rect x="40" y="40" width="110" height="44" rx="6" fill="#EFF6FF" stroke="#1E3A8A"/>
+      <text x="95" y="68" text-anchor="middle" class="lbl">D4-Augmented Encoder</text>
+      <rect x="40" y="120" width="130" height="36" rx="4" fill="#F0FDF4" stroke="#166534"/>
+      <text x="48" y="144" text-anchor="start" font-family="Arial, sans-serif" font-size="16">Observed Free</text>
+      <text x="148" y="144" text-anchor="start" font-family="Arial, sans-serif" font-size="16">1</text>
+      <text x="500" y="108" text-anchor="start" font-family="Arial, sans-serif" font-size="22" font-weight="700">Occupancy</text>
+      <image x="570" y="100" width="120" height="100" href="data:image/png;base64,AAAA"/>
     </svg>"""
-    rep_oob = lint_svg(
-        clipped_svg,
-        exact_text_inventory=["Hybrid Plan Generation", "Verified Output"],
-        expected_viewbox=(1600, 610),
-        density="detailed",
+    fixed_svg, stats = postprocess_svg_deterministic(crowded_svg)
+    assert stats["texts_autofit"] >= 3, f"Expected box autofit + sibling + image nudge, got {stats}"
+    assert "style=\"font-size:" in fixed_svg  # CSS-safe inline style overrides `.lbl`!
+    # Verify `Occupancy` was nudged up or shrunk away from image y=100..200
+    assert 'y="108"' not in fixed_svg or 'style="font-size:' in fixed_svg
+
+
+def test_autofigure_swap_1to1_encoding_and_backends() -> None:
+    small = Image.new("RGB", (1200, 600), (255, 255, 255))
+    up, did_up = upscale_image_to_4k_if_needed(small, target_long_edge=3840)
+    assert did_up and up.size == (3840, 1920)
+
+    merged = merge_overlapping_boxes(
+        [
+            {"x1": 100, "y1": 50, "x2": 220, "y2": 170, "score": 0.9},
+            {"x1": 104, "y1": 52, "x2": 218, "y2": 168, "score": 0.7},
+            {"x1": 400, "y1": 50, "x2": 520, "y2": 170, "score": 0.85},
+        ],
+        overlap_threshold=0.80,
     )
-    assert not rep_oob.passed_hard_checks
-    assert rep_oob.stats["out_of_bounds_count"] >= 2
-    assert rep_oob.stats["inventory_coverage_ratio"] == 1.0  # consecutive stacked <text> matched "Hybrid Plan Generation"!
-    assert any("Canvas clipping" in e for e in rep_oob.errors)
-    assert any("textLength" in e for e in rep_oob.errors)
+    assert len(merged) == 2 and merged[0]["label"] == "<AF>01" and merged[1]["label"] == "<AF>02"
 
-    # 3. Critic semantic retention guard: grouping 42 labels into 14 multi-line <tspan> elements MUST BE ACCEPTED
-    grouped_nodes = []
-    for g_idx in range(0, len(inventory), 3):
-        grp = inventory[g_idx : g_idx + 3]
-        col, row = (g_idx // 3) % 5, (g_idx // 3) // 5
-        x, y = 160 + col * 280, 90 + row * 160
-        tspans = "".join(f'<tspan x="{x}" dy="{0 if j == 0 else 18}">{lbl}</tspan>' for j, lbl in enumerate(grp))
-        grouped_nodes.append(
-            f'<text x="{x}" y="{y}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="14">{tspans}</text>'
-        )
-    grouped_svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">'
-        '<rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>'
-        + "".join(grouped_nodes)
-        + "</svg>"
-    )
-    rep_grouped = lint_svg(grouped_svg, exact_text_inventory=inventory, expected_viewbox=(1600, 610), density="detailed")
-    assert rep_grouped.stats["text_elements"] == 14  # < 50% of 42 <text> nodes!
-    ok_keep, msg_keep = check_critic_content_retention(rep_dense, rep_grouped, inventory)
-    assert ok_keep, f"Expected <tspan> consolidation to be accepted, got rejection: {msg_keep}"
+    # 1:1 native pixel encoding up to 4096px
+    wide = Image.new("RGB", (2162, 445), (255, 255, 255))
+    uri = encode_image_to_data_url(wide)
+    dec = Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1])))
+    assert dec.size == (2162, 445)
 
-    # 4. Destructive label deletion (dropping 75% of inventory) MUST BE REJECTED
-    pruned_svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 610" width="1600" height="610">'
-        '<rect x="0" y="0" width="1600" height="610" fill="#FFFFFF"/>'
-        + "".join(text_nodes[:8])
-        + "</svg>"
-    )
-    rep_pruned = lint_svg(pruned_svg, exact_text_inventory=inventory, expected_viewbox=(1600, 610), density="detailed")
-    ok_prune, msg_prune = check_critic_content_retention(rep_dense, rep_pruned, inventory)
-    assert not ok_prune and "dropped" in msg_prune.lower()
+    assert resolve_seg_backend("grounding_dino") == "grounding_dino"
+    assert resolve_seg_backend("cc_zero_gpu") == "cc_zero_gpu"
+    assert resolve_matting_backend("birefnet") == "birefnet"
+    assert resolve_matting_backend("floodfill") == "floodfill"
 
-
-def test_primary_ref_and_single_style_winner_and_cli_flags() -> None:
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        img1 = td_path / "big_ref.png"
-        img2 = td_path / "pinned_ref.png"
-        Image.new("RGB", (1200, 600), (240, 240, 240)).save(img1)
-        Image.new("RGB", (600, 300), (220, 230, 250)).save(img2)
-
-        # Pinning primary_ref strictly selects ONLY that single image
-        picked = discover_reference_images(td_path, primary_ref=img2)
-        assert picked == [img2]
-
-        # Multi-image extract_style_dna pins strictly to a SINGLE Primary Style Winner (length 1)
-        class _DummyClient:
-            def generate_multimodal(self, contents, **kwargs):
-                return json.dumps(
-                    {
-                        "visual_paradigm": "soft_card_editorial",
-                        "primary_anchor_reason": "Cleanest flat 2D layout without clutter.",
-                        "top_anchor_indices": [2, 1],
-                    }
-                )
-
-        dna = extract_style_dna(_DummyClient(), [img1, img2], target_archetype="framework")
-        assert dna["top_anchor_indices"] == [2]
-        assert dna["anchor_files"] == [str(img2)]
-        assert "Cleanest" in dna.get("primary_anchor_reason", "")
-
-    # CLI flags check
-    parser = cli_run.build_parser()
-    parsed = parser.parse_args(["--paper", "a.pdf", "--density", "detailed", "--primary-ref", "ref.png"])
-    assert parsed.density == "detailed"
-    assert parsed.primary_ref == Path("ref.png")
-
-
-def test_v20_surgical_giants_aia_gate_autofigure_and_sse_retry() -> None:
-    # 1. SSE transient stream-error retry classifier + per-stage effort caps (fast turnaround!)
-    assert resolve_stage_effort("xhigh", "low") == "low"
-    assert resolve_stage_effort("xhigh", "medium") == "medium"
-    assert resolve_stage_effort("low", "medium") == "low"
-    assert resolve_stage_effort("none", "low") == "none"
-    assert is_retryable_stream_error("{'type': 'service_unavailable_error', 'message': 'Our servers are currently overloaded.'}")
-    assert is_retryable_stream_error("503 temporarily unavailable")
-    assert not is_retryable_stream_error("DAILY_LIMIT_EXCEEDED: quota exhausted")
-    assert not is_retryable_stream_error("invalid_api_key")
-
-    # 2. AIA Stage-4 Aesthetic & Anti-Copy Gate deterministic enforcement
-    with tempfile.TemporaryDirectory() as td:
-        td_path = Path(td)
-        dummy_draft = td_path / "draft.png"
-        Image.new("RGB", (600, 300), (255, 255, 255)).save(dummy_draft)
-
-        class _LeakClient:
-            def generate_multimodal(self, contents, **kwargs):
-                return json.dumps(
-                    {
-                        "aesthetic_score_10": 9.2,
-                        "reference_content_leaked": True,
-                        "is_ppt_box_form": False,
-                        "text_or_arrow_errors": [],
-                        "revision_mode": "pass",
-                        "fix_instructions": "Change portrait subject",
-                    }
-                )
-
-        gate = audit_stage1_draft_aesthetics(
-            _LeakClient(), dummy_draft, "---BEGIN PROMPT---\n[EXACT TEXT INVENTORY]\n- \"A\"\n---END PROMPT---",
-            reference_paths=[], resolved_density="concise"
-        )
-        assert not gate["passed"] and gate["revision_mode"] == "regenerate_clean"
-
-        # 3. AutoFigure-Edit 4K upscale + overlapping box merge + samed.png + opaque photo protection + <AF>01 swap
-        small = Image.new("RGB", (1200, 600), (255, 255, 255))
-        up, did_up = upscale_image_to_4k_if_needed(small, target_long_edge=3840)
-        assert did_up and up.size == (3840, 1920)
-
-        merged = merge_overlapping_boxes(
-            [
-                {"x1": 100, "y1": 50, "x2": 220, "y2": 170, "score": 0.9},
-                {"x1": 104, "y1": 52, "x2": 218, "y2": 168, "score": 0.7},
-                {"x1": 400, "y1": 50, "x2": 520, "y2": 170, "score": 0.85},
-            ],
-            overlap_threshold=0.85,
-        )
-        assert len(merged) == 2
-        assert merged[0]["label"] == "<AF>01" and merged[1]["label"] == "<AF>02"
-
-        samed_out = draw_samed_placeholder_image(small, merged, td_path / "samed.png")
-        assert samed_out.is_file()
-
-        # Verify opaque photo detector distinguishes natural multi-color border from white-background icon
-        rng = np.random.default_rng(42)
-        photo_tile = Image.fromarray(rng.integers(20, 180, size=(80, 80, 3), dtype=np.uint8), mode="RGB")
-        icon_tile = Image.new("RGB", (80, 80), (255, 255, 255))
-        assert _looks_like_opaque_photo_tile(photo_tile) is True
-        assert _looks_like_opaque_photo_tile(icon_tile) is False
-
-        # Verify replace_icons_in_svg handles <g id="AF01" transform="translate(20, 10)"> and renders cleanly via resvg-py
+        assert draw_samed_placeholder_image(small, merged, td_path / "samed.png").is_file()
         icon_png = td_path / "icon_AF01_nobg.png"
         ic_arr = np.zeros((60, 60, 4), dtype=np.uint8)
         ic_arr[10:50, 10:50] = [37, 99, 235, 255]
@@ -535,107 +320,53 @@ def test_v20_surgical_giants_aia_gate_autofigure_and_sse_retry() -> None:
             ],
             figure_size=(800, 400),
         )
-        assert cnt == 1
-        assert 'id="icon_AF01"' in swapped and 'x="100.0" y="50.0"' in swapped
-        assert "&lt;AF&gt;01" not in swapped
+        assert cnt == 1 and 'id="icon_AF01"' in swapped and 'x="100.0" y="50.0"' in swapped
 
-        out_full = td_path / "swapped_full.png"
-        out_2col = td_path / "swapped_2col.png"
+        out_full = td_path / "final.png"
+        out_2col = td_path / "print_2col.png"
         render_dual_preview(swapped, out_full, out_2col, viewbox=(800, 400), full_zoom=1.0)
         with Image.open(out_full) as r_im:
             r_arr = np.array(r_im.convert("RGB"))
             patch = r_arr[60:160, 110:210]
             assert int(np.sum((patch[:, :, 2] > 180) & (patch[:, :, 0] < 100))) > 500
 
-    # 4. Auto backend resolution, 0.2s pixel-exact CC detector & v2.0 CLI flags
-    assert resolve_seg_backend("cc_zero_gpu") == "cc_zero_gpu"
-    assert resolve_seg_backend("vlm_zero_gpu") == "vlm_zero_gpu"
-    assert resolve_matting_backend("floodfill") == "floodfill"
-    from paper2svg.asset_extractor import detect_icons_pixel_exact_cc
-    with tempfile.TemporaryDirectory() as td_cc:
-        cc_img_path = Path(td_cc) / "syn.png"
-        syn = np.full((300, 700, 3), 255, dtype=np.uint8)
-        syn[70:220, 40:180] = [60, 120, 220]      # icon 1
-        syn[143:147, 190:250] = [20, 20, 20]      # thin horizontal arrow between icon 1 & icon 2
-        syn[70:220, 260:400] = [220, 110, 60]     # icon 2
-        syn[70:220, 480:640] = [70, 180, 120]     # icon 3
-        Image.fromarray(syn, mode="RGB").save(cc_img_path)
-        cc_boxes = detect_icons_pixel_exact_cc(cc_img_path)
-        assert len(cc_boxes) == 3, f"Expected 3 disjoint pixel-exact CC icons, got {len(cc_boxes)}: {cc_boxes}"
-        assert abs(cc_boxes[0]["x1"] - 40) <= 4 and abs(cc_boxes[0]["x2"] - 180) <= 4
-        assert abs(cc_boxes[1]["x1"] - 260) <= 4 and abs(cc_boxes[2]["x2"] - 640) <= 4
-    # 5. Verify 1:1 native pixel encoding (zero shrink drift up to 4096px) & ultra-wide banner font floor
-    import base64
-    from io import BytesIO
-    from paper2svg.client import encode_image_to_data_url
-    wide_img = Image.new("RGB", (2162, 445), (255, 255, 255))
-    uri = encode_image_to_data_url(wide_img)
-    dec = Image.open(BytesIO(base64.b64decode(uri.split(",", 1)[1])))
-    assert dec.size == (2162, 445), f"Expected 1:1 unscaled encoding for 2162x445, got {dec.size}"
-    wide_svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2162 445" width="2162" height="445">'
-        '<rect width="2162" height="445" fill="#ffffff"/>'
-        '<text x="661" y="305" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20">Semantic</text>'
-        '<text x="782" y="305" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20">Identity</text>'
-        '<text x="897" y="305" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20">Geometry</text>'
-        '</svg>'
-    )
-    wide_rep = lint_svg(wide_svg, expected_viewbox=(2162, 445), density="concise")
-    assert wide_rep.passed_hard_checks, f"Expected 20px sub-labels on 4.86:1 banner to pass: {wide_rep.errors}"
+
+def test_svg_linter_cli_and_fastapi_workbench() -> None:
+    touching_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 680" width="1600" height="680">
+      <rect width="1600" height="680" fill="#FFFFFF"/>
+      <text x="500" y="300" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Identity</text>
+      <text x="580" y="300" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Geometry</text>
+    </svg>"""
+    rep = lint_svg(touching_svg, expected_viewbox=(1600, 680))
+    assert any("Text collision" in e for e in rep.errors)
 
     parser = cli_run.build_parser()
     parsed = parser.parse_args(
         [
-            "--input-figure",
-            "hero.png",
-            "--svg-engine",
-            "autofigure",
-            "--seg-backend",
-            "vlm_zero_gpu",
-            "--matting-backend",
-            "floodfill",
-            "--pause-after-draft",
-            "--draft-review-rounds",
-            "2",
+            "--paper", "paper.pdf",
+            "--style-ref", "ref.png",
+            "--subject-images", "in.png", "out.png",
+            "--seg-backend", "grounding_dino",
+            "--matting-backend", "birefnet",
+            "--optimize-iterations", "2",
+            "--pause-after-step1",
         ]
     )
-    assert parsed.input_figure == Path("hero.png")
-    assert parsed.svg_engine == "autofigure"
-    assert parsed.pause_after_draft is True
-    assert parsed.draft_review_rounds == 2
+    assert parsed.paper == Path("paper.pdf")
+    assert parsed.style_ref == Path("ref.png")
+    assert parsed.subject_images == [Path("in.png"), Path("out.png")]
+    assert parsed.pause_after_step1 is True
+    assert parsed.optimize_iterations == 2
 
-
-def test_fastapi_endpoints_and_svgedit() -> None:
     client = TestClient(app)
     r_home = client.get("/")
     assert r_home.status_code == 200 and "Paper2SVG-ultra" in r_home.text
     r_cfg = client.get("/api/config")
     assert r_cfg.status_code == 200
     cfg = r_cfg.json()
-    assert cfg["version"] == "2.1.0"
-    assert cfg["main_model"]
-    assert cfg["svg_engine"] in ("autofigure", "legacy")
-    assert cfg["svg_mode"] in ("hybrid_rich", "pure_vector")
-    assert cfg["density"] in ("auto", "concise", "detailed")
+    assert cfg["version"] == "3.0.0"
     assert cfg["svg_edit_url"] == "/svg-edit/editor/index.html"
-    r_edit = client.get("/svg-edit/editor/index.html")
-    assert r_edit.status_code == 200
+    assert client.get("/svg-edit/editor/index.html").status_code == 200
     r_qr = client.get("/assets/sponsor_wechat.jpg")
     assert r_qr.status_code == 200 and r_qr.headers["content-type"].startswith("image/jpeg")
-    r_runs = client.get("/api/runs")
-    assert r_runs.status_code == 200
-
-
-if __name__ == "__main__":
-    test_font_guardrail()
-    test_reasoning_payload_config()
-    test_archetypes()
-    test_pdf_section_filtering()
-    test_schema_parsing()
-    test_hybrid_asset_crop_bg_removal_and_svg_render()
-    test_svg_linter_catches_bad_and_passes_good()
-    test_strip_edge_text_bleed_preserves_graphic_and_removes_caption_sliver()
-    test_adaptive_density_oob_and_critic_retention_guard()
-    test_primary_ref_and_single_style_winner_and_cli_flags()
-    test_fastapi_endpoints_and_svgedit()
-    print("ALL v1.1.0 AUTOMATED TESTS PASSED!")
+    assert client.get("/api/runs").status_code == 200

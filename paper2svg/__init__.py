@@ -1,3 +1,3 @@
-"""Paper2SVG-ultra: Reference-driven top-venue academic paper framework diagram generator (PDF + Refs -> Editable Hybrid SVG)."""
+"""Paper2SVG-ultra v3.0: Pure AutoFigure-Edit Editable Scientific SVG Generator."""
 
-__version__ = "2.1.0"
+__version__ = "3.0.0"

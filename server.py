@@ -1,4 +1,4 @@
-"""FastAPI Web Workbench for Paper2SVG-ultra v2.1 (AIA Front-End + AutoFigure-Edit Back-End + svg-edit)."""
+"""FastAPI Web Workbench for Paper2SVG-ultra v3.0 (Pure AutoFigure-Edit + Local GPU/Zero-GPU + svg-edit)."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from paper2svg.archetypes import ARCHETYPES
-from paper2svg.autofigure_engine import resolve_matting_backend, resolve_seg_backend
+from paper2svg import __version__
+from paper2svg.autofigure_engine import probe_gpu_capabilities, resolve_matting_backend, resolve_seg_backend
 from paper2svg.config import PROJECT_ROOT, load_settings
 from paper2svg.pipeline import run_pipeline
 from paper2svg.svg_linter import validate_svg_xml
@@ -35,7 +35,6 @@ def _find_svg_edit_dir() -> Optional[Path]:
     for candidate in (
         WEB_DIR / "vendor" / "svg-edit",
         PROJECT_ROOT / "others" / "repos" / "AutoFigure-Edit" / "web" / "vendor" / "svg-edit",
-        PROJECT_ROOT / "repos" / "AutoFigure-Edit" / "web" / "vendor" / "svg-edit",
     ):
         if (candidate / "editor" / "index.html").is_file():
             return candidate
@@ -43,13 +42,11 @@ def _find_svg_edit_dir() -> Optional[Path]:
 
 
 SVG_EDIT_DIR = _find_svg_edit_dir()
-
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Paper2SVG-ultra v2.1 Workbench")
+app = FastAPI(title=f"Paper2SVG-ultra v{__version__} Workbench")
 
-# Mount bundled MIT-licensed svg-edit canvas
 if SVG_EDIT_DIR is not None:
     app.mount("/svg-edit", StaticFiles(directory=str(SVG_EDIT_DIR), html=True), name="svg-edit")
 
@@ -58,7 +55,7 @@ if SVG_EDIT_DIR is not None:
 class JobState:
     job_id: str
     output_dir: Path
-    status: str = "running"  # running | paused_after_schema | paused_after_draft | completed | failed
+    status: str = "running"  # running | paused_after_step1 | completed | failed
     error: Optional[str] = None
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[queue.Queue] = field(default_factory=list)
@@ -79,32 +76,19 @@ ALLOWED_ARTIFACTS = {
     "final.png",
     "print_preview_2col.png",
     "figure.png",
+    "figure_raw.png",
     "samed.png",
+    "samed_candidates.png",
     "boxlib.json",
     "template.svg",
     "optimized_template.svg",
-    "stage1_draft.png",
-    "stage1_draft_raw.png",
-    "stage1_draft_v1.png",
-    "stage1_draft_v2.png",
-    "stage1_draft_v3.png",
-    "stage1_draft_v4.png",
-    "stage1_draft_ruler.png",
-    "stage1_draft_verify.png",
-    "stage1_draft_verify_calibrated.png",
-    "stage1_draft_masked.png",
-    "assets_manifest.json",
-    "raw.svg",
-    "schema.md",
-    "style_guide.md",
-    "style_dna.json",
-    "paper_method.md",
-    "paper_analysis.json",
+    "final_pre_polish.svg",
+    "final_pre_polish.png",
+    "method_section.txt",
+    "step1_prompt.txt",
+    "step1_meta.json",
     "qa.md",
     "run_manifest.json",
-    "stage4_render_prompt.txt",
-    "stage4_meta.json",
-    "stage4_gate_report.json",
 }
 
 
@@ -120,25 +104,22 @@ def _safe_job_dir(job_id: str) -> Path:
 def _start_pipeline_thread(
     job: JobState,
     *,
-    paper_pdf: Optional[Path],
+    paper_pdf: Optional[Path] = None,
+    method_file: Optional[Path] = None,
+    method_text_override: Optional[str] = None,
     input_figure: Optional[Path] = None,
-    refs_dir: Optional[Path],
-    lang: str,
-    archetype: Optional[str],
-    critic_rounds: int,
-    draft_review_rounds: Optional[int] = None,
-    main_model: Optional[str],
-    reasoning_effort: Optional[str],
-    image_model: Optional[str],
-    svg_mode: Optional[str],
-    svg_engine: Optional[str] = None,
+    style_ref: Optional[Path] = None,
+    subject_images: Optional[list[Path]] = None,
+    lang: str = "auto",
+    optimize_iterations: int = 2,
+    main_model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    image_model: Optional[str] = None,
+    svg_mode: Optional[str] = None,
     seg_backend: Optional[str] = None,
     matting_backend: Optional[str] = None,
-    density: Optional[str] = None,
-    primary_ref: Optional[Path] = None,
-    from_stage: int = 1,
-    pause_after_schema: bool = False,
-    pause_after_draft: bool = False,
+    from_step: int = 1,
+    pause_after_step1: bool = False,
 ) -> None:
     def _worker() -> None:
         try:
@@ -151,52 +132,35 @@ def _start_pipeline_thread(
                 settings.image_tool_model = image_model.strip()
             if svg_mode and svg_mode.strip():
                 settings.svg_mode = svg_mode.strip().lower()
-            if svg_engine and svg_engine.strip():
-                settings.svg_engine = svg_engine.strip().lower()
             if seg_backend and seg_backend.strip():
                 settings.seg_backend = seg_backend.strip().lower()
             if matting_backend and matting_backend.strip():
                 settings.matting_backend = matting_backend.strip().lower()
-            if density and density.strip():
-                settings.density = density.strip().lower()
 
-            def _on_event(evt_type: str, payload: dict[str, Any]) -> None:
-                job.push(evt_type, payload)
-
-            stop_stage = 3 if pause_after_schema else (4 if pause_after_draft else None)
             res = run_pipeline(
                 paper_pdf=paper_pdf,
+                method_file=method_file,
+                method_text_override=method_text_override,
                 input_figure=input_figure,
-                refs_dir=refs_dir,
+                style_ref=style_ref,
+                subject_images=subject_images,
                 output_dir=job.output_dir,
                 settings=settings,
                 lang=lang,
-                archetype_override=archetype or None,
                 svg_mode_override=settings.svg_mode,
-                svg_engine_override=settings.svg_engine,
-                density_override=settings.density,
-                primary_ref=primary_ref,
                 seg_backend_override=settings.seg_backend,
                 matting_backend_override=settings.matting_backend,
-                draft_review_rounds=draft_review_rounds,
-                critic_rounds=critic_rounds,
-                from_stage=from_stage,
-                stop_after_stage=stop_stage,
-                on_event=_on_event,
+                optimize_iterations=optimize_iterations,
+                from_step=from_step,
+                stop_after_step=1 if pause_after_step1 else None,
+                on_event=lambda evt_type, payload: job.push(evt_type, payload),
             )
-            if pause_after_schema:
-                job.status = "paused_after_schema"
-            elif pause_after_draft:
-                job.status = "paused_after_draft"
-            else:
-                job.status = "completed"
+            job.status = "paused_after_step1" if pause_after_step1 else "completed"
             job.push(
                 "done",
                 {
                     "status": job.status,
                     "job_id": job.job_id,
-                    "archetype": res.archetype,
-                    "svg_engine": res.svg_engine,
                     "seg_backend": res.seg_backend,
                     "matting_backend": res.matting_backend,
                     "viewbox": list(res.viewbox),
@@ -208,8 +172,7 @@ def _start_pipeline_thread(
             job.error = str(exc)
             job.push("error", {"status": "failed", "error": str(exc)})
 
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 @app.get("/")
@@ -228,6 +191,7 @@ def get_sponsor_qr() -> FileResponse:
 @app.get("/api/config")
 def get_config() -> JSONResponse:
     s = load_settings()
+    caps = probe_gpu_capabilities(s.gpu_python)
     svg_edit_url = (
         "/svg-edit/editor/index.html"
         if (SVG_EDIT_DIR is not None and (SVG_EDIT_DIR / "editor" / "index.html").is_file())
@@ -235,34 +199,21 @@ def get_config() -> JSONResponse:
     )
     return JSONResponse(
         {
-            "version": "2.1.0",
+            "version": __version__,
             "main_model": s.main_model,
             "reasoning_effort": s.reasoning_effort,
             "image_tool_model": s.image_tool_model,
-            "image_quality": s.image_quality,
             "svg_mode": s.svg_mode,
-            "svg_engine": s.svg_engine,
             "seg_backend": s.seg_backend,
-            "resolved_seg_backend": resolve_seg_backend(s.seg_backend, s.sam_api_key),
+            "resolved_seg_backend": resolve_seg_backend(s.seg_backend, s.sam_api_key, gpu_python=s.gpu_python),
             "matting_backend": s.matting_backend,
-            "resolved_matting_backend": resolve_matting_backend(s.matting_backend, s.rmbg_model_path),
-            "draft_review_rounds": s.draft_review_rounds,
-            "density": s.density,
-            "critic_rounds": s.critic_rounds,
+            "resolved_matting_backend": resolve_matting_backend(s.matting_backend, s.rmbg_model_path, gpu_python=s.gpu_python),
+            "gpu_name": caps.get("gpu_name") or "",
+            "optimize_iterations": s.optimize_iterations,
             "font_family": s.font_family,
             "lang": s.lang,
             "api_configured": bool(s.api_key),
             "svg_edit_url": svg_edit_url,
-            "archetypes": [
-                {
-                    "key": a.key,
-                    "zh_name": a.zh_name,
-                    "en_name": a.en_name,
-                    "story_trigger": a.story_trigger,
-                    "is_wide_banner": a.is_wide_banner,
-                }
-                for a in ARCHETYPES.values()
-            ],
         }
     )
 
@@ -283,23 +234,22 @@ def list_runs() -> JSONResponse:
         live_job = JOBS.get(d.name)
         status = live_job.status if live_job else meta.get("status", "completed" if (d / "final.svg").is_file() else "unknown")
         src_name = d.name
-        if meta.get("paper_pdf"):
-            src_name = Path(meta["paper_pdf"]).name
-        elif meta.get("input_figure"):
-            src_name = Path(meta["input_figure"]).name
+        for k in ("paper_pdf", "method_file", "input_figure"):
+            if meta.get(k):
+                src_name = Path(meta[k]).name
+                break
         runs.append(
             {
                 "job_id": d.name,
                 "status": status,
                 "created_at": meta.get("created_at", datetime.fromtimestamp(d.stat().st_mtime).isoformat(timespec="seconds")),
-                "archetype": meta.get("archetype", ""),
-                "archetype_name": meta.get("archetype_name", ""),
-                "svg_engine": meta.get("svg_engine", "autofigure"),
+                "seg_backend": meta.get("seg_backend", ""),
+                "matting_backend": meta.get("matting_backend", ""),
                 "viewbox": meta.get("viewbox"),
                 "paper_name": src_name,
                 "has_final_svg": (d / "final.svg").is_file(),
-                "has_schema": (d / "schema.md").is_file(),
-                "has_draft": (d / "stage1_draft.png").is_file(),
+                "has_figure": (d / "figure.png").is_file(),
+                "has_method": (d / "method_section.txt").is_file(),
             }
         )
     return JSONResponse({"runs": runs[:50]})
@@ -308,33 +258,30 @@ def list_runs() -> JSONResponse:
 @app.post("/api/run")
 async def start_run(
     paper_pdf: Optional[UploadFile] = File(default=None),
+    method_text: str = Form(default=""),
     input_figure: Optional[UploadFile] = File(default=None),
-    ref_images: list[UploadFile] = File(default=[]),
-    refs_dir_path: str = Form(default=""),
-    primary_ref_path: str = Form(default=""),
+    style_ref: Optional[UploadFile] = File(default=None),
+    style_ref_path: str = Form(default=""),
+    subject_images: list[UploadFile] = File(default=[]),
     lang: str = Form(default="auto"),
-    archetype: str = Form(default=""),
-    critic_rounds: int = Form(default=2),
-    draft_review_rounds: int = Form(default=2),
+    optimize_iterations: int = Form(default=2),
     main_model: str = Form(default=""),
     reasoning_effort: str = Form(default=""),
     image_model: str = Form(default=""),
-    svg_mode: str = Form(default=""),
-    svg_engine: str = Form(default="autofigure"),
+    svg_mode: str = Form(default="hybrid_rich"),
     seg_backend: str = Form(default="auto"),
     matting_backend: str = Form(default="auto"),
-    density: str = Form(default="auto"),
-    pause_after_schema: bool = Form(default=False),
-    pause_after_draft: bool = Form(default=False),
+    pause_after_step1: bool = Form(default=False),
 ) -> JSONResponse:
     has_pdf = paper_pdf is not None and bool(paper_pdf.filename)
+    has_txt = bool(method_text.strip())
     has_fig = input_figure is not None and bool(input_figure.filename)
-    if not has_pdf and not has_fig:
-        raise HTTPException(status_code=400, detail="Please upload a paper PDF or an existing raster figure.")
+    if not has_pdf and not has_txt and not has_fig:
+        raise HTTPException(status_code=400, detail="Please upload a paper PDF, paste Method text, or upload a Step-1 figure.")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     short_uid = uuid.uuid4().hex[:6]
-    orig_stem = Path((paper_pdf.filename if has_pdf else input_figure.filename) or "paper").stem  # type: ignore[union-attr]
+    orig_stem = Path((paper_pdf.filename if has_pdf else (input_figure.filename if has_fig else "method")) or "paper").stem  # type: ignore[union-attr]
     safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", orig_stem)[:28].strip("_") or "paper"
     job_id = f"{safe_stem}_{stamp}_{short_uid}"
 
@@ -351,27 +298,25 @@ async def start_run(
         saved_fig = upload_dir / Path(input_figure.filename or "figure.png").name
         saved_fig.write_bytes(await input_figure.read())
 
-    resolved_refs_dir: Optional[Path] = None
-    valid_uploads = [f for f in ref_images if f and f.filename]
-    if valid_uploads:
-        refs_upload_dir = upload_dir / "refs"
-        refs_upload_dir.mkdir(parents=True, exist_ok=True)
-        for idx, rf in enumerate(valid_uploads, 1):
-            fname = Path(rf.filename or f"ref_{idx}.png").name
-            (refs_upload_dir / f"{idx:02d}_{fname}").write_bytes(await rf.read())
-        resolved_refs_dir = refs_upload_dir
-    elif refs_dir_path.strip():
-        candidate = Path(refs_dir_path.strip())
-        if not candidate.exists():
-            raise HTTPException(status_code=400, detail=f"Reference folder does not exist: {candidate}")
-        resolved_refs_dir = candidate
+    saved_style_ref: Optional[Path] = None
+    if style_ref is not None and style_ref.filename:
+        saved_style_ref = upload_dir / f"style_ref_{Path(style_ref.filename).name}"
+        saved_style_ref.write_bytes(await style_ref.read())
+    elif style_ref_path.strip():
+        cand = Path(style_ref_path.strip())
+        if not cand.is_file():
+            raise HTTPException(status_code=400, detail=f"Style reference file does not exist: {cand}")
+        saved_style_ref = cand
 
-    resolved_primary_ref: Optional[Path] = None
-    if primary_ref_path.strip():
-        p_cand = Path(primary_ref_path.strip())
-        if not p_cand.is_file():
-            raise HTTPException(status_code=400, detail=f"Primary reference image does not exist: {p_cand}")
-        resolved_primary_ref = p_cand
+    saved_subjects: list[Path] = []
+    valid_subs = [f for f in subject_images if f and f.filename]
+    if valid_subs:
+        subj_dir = upload_dir / "subjects"
+        subj_dir.mkdir(parents=True, exist_ok=True)
+        for idx, sf in enumerate(valid_subs, 1):
+            p = subj_dir / f"{idx:02d}_{Path(sf.filename or f'subj_{idx}.png').name}"
+            p.write_bytes(await sf.read())
+            saved_subjects.append(p)
 
     out_dir = OUTPUTS_DIR / job_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -381,42 +326,35 @@ async def start_run(
     _start_pipeline_thread(
         job,
         paper_pdf=saved_pdf,
+        method_text_override=method_text.strip() or None,
         input_figure=saved_fig,
-        refs_dir=resolved_refs_dir,
+        style_ref=saved_style_ref,
+        subject_images=saved_subjects or None,
         lang=lang,
-        archetype=archetype.strip() or None,
-        critic_rounds=max(0, min(4, int(critic_rounds))),
-        draft_review_rounds=max(0, min(3, int(draft_review_rounds))),
+        optimize_iterations=max(0, min(4, int(optimize_iterations))),
         main_model=main_model.strip() or None,
         reasoning_effort=reasoning_effort.strip() or None,
         image_model=image_model.strip() or None,
-        svg_mode=svg_mode.strip() or None,
-        svg_engine=svg_engine.strip() or "autofigure",
+        svg_mode=svg_mode.strip() or "hybrid_rich",
         seg_backend=seg_backend.strip() or "auto",
         matting_backend=matting_backend.strip() or "auto",
-        density=density.strip() or None,
-        primary_ref=resolved_primary_ref,
-        from_stage=1,
-        pause_after_schema=pause_after_schema,
-        pause_after_draft=pause_after_draft,
+        from_step=1,
+        pause_after_step1=pause_after_step1,
     )
     return JSONResponse({"job_id": job_id, "status": "running"})
 
 
 class ResumeRequest(BaseModel):
-    from_stage: int = 4
-    schema_md: Optional[str] = None
-    critic_rounds: int = 2
-    draft_review_rounds: Optional[int] = None
-    image_model: Optional[str] = None
+    from_step: int = 2
+    method_text: Optional[str] = None
+    optimize_iterations: int = 2
     main_model: Optional[str] = None
     reasoning_effort: Optional[str] = None
+    image_model: Optional[str] = None
     svg_mode: Optional[str] = None
-    svg_engine: Optional[str] = None
     seg_backend: Optional[str] = None
     matting_backend: Optional[str] = None
-    density: Optional[str] = None
-    pause_after_draft: bool = False
+    pause_after_step1: bool = False
 
 
 @app.post("/api/runs/{job_id}/resume")
@@ -425,40 +363,34 @@ def resume_run(job_id: str, req: ResumeRequest) -> JSONResponse:
     if not out_dir.is_dir():
         raise HTTPException(status_code=404, detail="Run not found")
 
-    if req.schema_md is not None:
-        (out_dir / "schema.md").write_text(req.schema_md, encoding="utf-8")
+    if req.method_text is not None:
+        (out_dir / "method_section.txt").write_text(req.method_text, encoding="utf-8")
 
     manifest_file = out_dir / "run_manifest.json"
     manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.is_file() else {}
-    paper_pdf = Path(manifest["paper_pdf"]) if manifest.get("paper_pdf") else None
-    refs_dir = Path(manifest["refs_dir"]) if manifest.get("refs_dir") else None
-    primary_ref = Path(manifest["primary_ref"]) if manifest.get("primary_ref") else None
+    style_ref = Path(manifest["style_ref"]) if manifest.get("style_ref") else None
+    subjects = [Path(p) for p in manifest.get("subject_images", []) if Path(p).is_file()]
 
     job = JobState(job_id=job_id, output_dir=out_dir)
     JOBS[job_id] = job
 
     _start_pipeline_thread(
         job,
-        paper_pdf=paper_pdf,
-        refs_dir=refs_dir,
+        method_text_override=req.method_text,
+        style_ref=style_ref,
+        subject_images=subjects or None,
         lang=manifest.get("lang", "auto"),
-        archetype=manifest.get("archetype") or None,
-        critic_rounds=max(0, min(4, req.critic_rounds)),
-        draft_review_rounds=req.draft_review_rounds,
+        optimize_iterations=max(0, min(4, req.optimize_iterations)),
         main_model=req.main_model or manifest.get("main_model"),
         reasoning_effort=req.reasoning_effort or manifest.get("reasoning_effort"),
         image_model=req.image_model or manifest.get("image_tool_model"),
         svg_mode=req.svg_mode or manifest.get("svg_mode"),
-        svg_engine=req.svg_engine or manifest.get("svg_engine"),
         seg_backend=req.seg_backend or manifest.get("seg_backend"),
         matting_backend=req.matting_backend or manifest.get("matting_backend"),
-        density=req.density or manifest.get("density"),
-        primary_ref=primary_ref,
-        from_stage=max(1, min(6, req.from_stage)),
-        pause_after_schema=False,
-        pause_after_draft=req.pause_after_draft,
+        from_step=max(1, min(2, req.from_step)),
+        pause_after_step1=req.pause_after_step1,
     )
-    return JSONResponse({"job_id": job_id, "status": "running", "from_stage": req.from_stage})
+    return JSONResponse({"job_id": job_id, "status": "running", "from_step": req.from_step})
 
 
 @app.get("/api/runs/{job_id}/events")
@@ -522,7 +454,7 @@ class SaveSvgRequest(BaseModel):
 
 @app.post("/api/runs/{job_id}/save-svg")
 def save_edited_svg(job_id: str, req: SaveSvgRequest) -> JSONResponse:
-    """Persist edits from the embedded svg-edit canvas back to final.svg & re-render PNG previews."""
+    """Persist manual edits from embedded svg-edit back to final.svg & refresh PNG previews."""
     out_dir = _safe_job_dir(job_id)
     if not out_dir.is_dir():
         raise HTTPException(status_code=404, detail="Run not found")
@@ -531,16 +463,8 @@ def save_edited_svg(job_id: str, req: SaveSvgRequest) -> JSONResponse:
     if not ok:
         raise HTTPException(status_code=400, detail=f"Invalid SVG XML: {errs[:3]}")
 
-    final_svg_path = out_dir / "final.svg"
-    final_svg_path.write_text(req.svg_code, encoding="utf-8")
-
+    (out_dir / "final.svg").write_text(req.svg_code, encoding="utf-8")
     m = re.search(r'viewBox="[^"]*?(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)\s*"', req.svg_code)
-    vb = (int(float(m.group(1))), int(float(m.group(2)))) if m else (1600, 680)
-    render_dual_preview(
-        req.svg_code,
-        out_dir / "final.png",
-        out_dir / "print_preview_2col.png",
-        viewbox=vb,
-        full_zoom=2.0,
-    )
+    vb = (int(float(m.group(1))), int(float(m.group(2)))) if m else (1600, 800)
+    render_dual_preview(req.svg_code, out_dir / "final.png", out_dir / "print_preview_2col.png", viewbox=vb, full_zoom=2.0)
     return JSONResponse({"saved": True, "viewbox": list(vb)})

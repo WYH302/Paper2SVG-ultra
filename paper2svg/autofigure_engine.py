@@ -1,11 +1,15 @@
-"""Cut 2: True AutoFigure-Edit Native Back-End Engine (4K Upscale + Pluggable SAM3/Zero-GPU +
-Pluggable RMBG-2.0/BiRefNet/FloodFill + Clean <AF>01 Template SVG -> Optimize -> Deterministic Swap).
+"""Paper2SVG-ultra v3.0 — Pure AutoFigure-Edit Native Vector Engine.
 
-Preserves the proven core pipeline of upstream AutoFigure-Edit (`autofigure2.py`) while transplanting
-Paper2SVG-ultra's 3 Windows-bulletproof engineering upgrades:
-  1. OpenAI Responses API SSE streaming (no HTTP 524 timeouts, automatic transient overload retry)
-  2. Pure-Rust zero-DLL `resvg-py` rendering (replacing fragile `cairosvg`)
-  3. Zero-GPU VLM+NumPy segmentation & border-floodfill matting fallback when SAM3/RMBG-2.0 aren't installed
+Clean, single-backbone pipeline (Step 2 -> Step 3 -> Step 4 -> Step 4.6 -> Step 5 -> Step 5.5):
+  - Step 2 (Icon Segmentation -> `samed.png` + `boxlib.json`):
+      `sam3_local` -> `sam3_fal` -> `sam3_roboflow` -> local CUDA `grounding_dino` + frame-stripped CC -> zero-GPU CC
+      (with strict VLM semantic icon filter preventing text/panel swallowing).
+  - Step 3 (Photo-Protected Matting -> `icons/icon_AF.._nobg.png`):
+      Rectangular photos/portraits/heatmaps protected (`opaque_rect`), transparent icons batch-matted via
+      `rmbg2` -> zero-token `birefnet` -> zero-GPU `floodfill`.
+  - Step 4 (`<AF>` Template SVG) + Step 4.6 (Template Alignment via Windows zero-DLL `resvg-py`)
+  - Step 5 (Deterministic `<AF>` -> base64 `<image>` Swap) + `postprocess_svg_deterministic` (0.05s)
+  - Step 5.5 (1-Round Post-Swap Visual Polish on the REAL composited render) + final `postprocess_svg_deterministic`
 """
 
 from __future__ import annotations
@@ -14,10 +18,12 @@ import base64
 import importlib.util
 import io
 import json
-import math
 import os
 import re
-import shutil
+import subprocess
+import sys
+import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -25,16 +31,22 @@ import httpx
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from .architect import extract_exact_text_inventory
-from .asset_extractor import (
-    detect_and_crop_visual_assets,
-    detect_icons_pixel_exact_cc,
+from .config import PROJECT_ROOT, resolve_density_mode, resolve_stage_effort
+from .icon_utils import (
+    detect_cc_frame_stripped,
+    looks_like_opaque_photo_tile,
     smart_remove_border_background,
     strip_edge_text_bleed,
+    strip_text_edges_on_box,
 )
-from .config import resolve_density_mode, resolve_stage_effort
-from .svg_builder import extract_svg_block, fix_svg_xml_with_llm, normalize_svg_root
-from .svg_linter import TWO_COLUMN_WIDTH_PT, LintReport, lint_svg, validate_svg_xml
+from .svg_linter import LintReport, lint_svg, validate_svg_xml
+from .svg_postprocess import (
+    extract_svg_block,
+    fix_svg_xml_with_llm,
+    normalize_svg_root,
+    postprocess_svg_deterministic,
+    sanitize_svg_numeric_typos,
+)
 from .svg_renderer import render_dual_preview, render_svg_to_png
 
 UPSCALE_TARGET_LONG_EDGE = 3840
@@ -51,7 +63,7 @@ def upscale_image_to_4k_if_needed(
     image: Image.Image,
     target_long_edge: int = UPSCALE_TARGET_LONG_EDGE,
 ) -> tuple[Image.Image, bool]:
-    """Upscale an image proportionally so its long edge reaches 4K (exact AutoFigure-Edit logic)."""
+    """Upscale an image proportionally so its long edge reaches 4K (upstream AutoFigure-Edit logic)."""
     width, height = image.size
     long_edge = max(width, height)
     if long_edge <= 0 or long_edge >= target_long_edge:
@@ -61,8 +73,7 @@ def upscale_image_to_4k_if_needed(
     new_width = max(1, int(round(width * scale)))
     new_height = max(1, int(round(height * scale)))
     resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
-    upscaled = image.resize((new_width, new_height), resample=resample)
-    return upscaled, True
+    return image.resize((new_width, new_height), resample=resample), True
 
 
 def prepare_imported_figure(
@@ -84,7 +95,7 @@ def prepare_imported_figure(
 
 
 # ============================================================================
-# Step 2: Pluggable Segmentation (SAM3 Local / Fal / Roboflow / Zero-GPU VLM)
+# GPU Worker Probe & Backend Resolution
 # ============================================================================
 
 
@@ -101,63 +112,138 @@ def _has_hf_cached_repo(repo_slug: str) -> bool:
     snapshots_dir = hf_home / "hub" / f"models--{repo_slug.replace('/', '--')}" / "snapshots"
     if not snapshots_dir.exists():
         return False
-    return any(snapshots_dir.glob("*/config.json")) or any(snapshots_dir.glob("*/*.safetensors")) or any(
-        snapshots_dir.glob("*/*.pt")
+    return (
+        any(snapshots_dir.glob("*/config.json"))
+        or any(snapshots_dir.glob("*/*.safetensors"))
+        or any(snapshots_dir.glob("*/*.pt"))
     )
 
 
-def _sam3_local_ready() -> bool:
-    if importlib.util.find_spec("sam3") is None or importlib.util.find_spec("torch") is None:
-        return False
-    return _has_hf_cached_repo("facebook/sam3") or (_get_hf_token() is not None)
+def _worker_env(hf_endpoint: str = "") -> dict[str, str]:
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    repo_str = str(PROJECT_ROOT)
+    env["PYTHONPATH"] = f"{repo_str}{os.pathsep}{existing_pp}" if existing_pp else repo_str
+    ep = (hf_endpoint or env.get("HF_ENDPOINT") or "").strip()
+    if ep:
+        env["HF_ENDPOINT"] = ep
+    return env
 
 
-def _rmbg2_local_ready(rmbg_model_path: str = "") -> bool:
-    if importlib.util.find_spec("torch") is None or importlib.util.find_spec("transformers") is None:
-        return False
-    if rmbg_model_path and Path(rmbg_model_path).exists():
-        return True
-    return _has_hf_cached_repo("briaai/RMBG-2.0") or (_get_hf_token() is not None)
+@lru_cache(maxsize=8)
+def probe_gpu_capabilities(gpu_python: str = "") -> dict[str, Any]:
+    """Probe CUDA/PyTorch/SAM3/Transformers/Kornia capabilities in-process or via configured `GPU_PYTHON`."""
+    py = (gpu_python or os.environ.get("GPU_PYTHON") or "").strip()
+    if py and Path(py).is_file():
+        try:
+            proc = subprocess.run(
+                [py, "-m", "paper2svg.gpu_worker", "--task", "probe"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=_worker_env(),
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return json.loads(proc.stdout.strip().splitlines()[-1])
+        except Exception:
+            pass
+
+    # In-process check
+    has_torch = importlib.util.find_spec("torch") is not None
+    cuda = False
+    gpu_name = ""
+    if has_torch:
+        try:
+            import torch
+
+            cuda = bool(torch.cuda.is_available())
+            if cuda:
+                gpu_name = torch.cuda.get_device_name(0)
+        except Exception:
+            cuda = False
+    return {
+        "python": sys.executable,
+        "torch": has_torch,
+        "cuda": cuda,
+        "gpu_name": gpu_name,
+        "transformers": importlib.util.find_spec("transformers") is not None,
+        "sam3": importlib.util.find_spec("sam3") is not None,
+        "kornia": importlib.util.find_spec("kornia") is not None,
+        "timm": importlib.util.find_spec("timm") is not None,
+        "rembg": importlib.util.find_spec("rembg") is not None,
+    }
 
 
-def _birefnet_or_rembg_ready() -> bool:
-    if importlib.util.find_spec("rembg") is not None:
-        return True
-    if importlib.util.find_spec("torch") is not None and importlib.util.find_spec("transformers") is not None:
-        return _has_hf_cached_repo("ZhengPeng7/BiRefNet")
-    return False
+def _should_use_external_gpu_python(gpu_python: str = "") -> Optional[Path]:
+    py = (gpu_python or os.environ.get("GPU_PYTHON") or "").strip()
+    if not py:
+        return None
+    p = Path(py)
+    if not p.is_file():
+        return None
+    try:
+        if p.resolve() == Path(sys.executable).resolve():
+            return None
+    except Exception:
+        pass
+    return p
 
 
-def resolve_seg_backend(requested: str = "auto", sam_api_key: str = "") -> str:
-    """Resolve effective segmentation backend: SAM3 (if configured) -> 0.2s pixel-exact cc_zero_gpu."""
+def resolve_seg_backend(
+    requested: str = "auto",
+    sam_api_key: str = "",
+    *,
+    gpu_python: str = "",
+) -> str:
+    """Resolve effective Step 2 backend: SAM3 (local/fal/roboflow) -> local CUDA GroundingDINO -> zero-GPU CC."""
     req = (requested or "auto").strip().lower()
-    if req in ("sam3_local", "sam3_fal", "sam3_roboflow", "cc_zero_gpu", "vlm_zero_gpu"):
+    if req in ("sam3_local", "sam3_fal", "sam3_roboflow", "grounding_dino", "cc_zero_gpu"):
         return req
-    if _sam3_local_ready():
+
+    caps = probe_gpu_capabilities(gpu_python)
+    if caps.get("sam3") and caps.get("torch") and (_has_hf_cached_repo("facebook/sam3") or _get_hf_token()):
         return "sam3_local"
-    if (sam_api_key and os.environ.get("FAL_KEY")) or os.environ.get("FAL_KEY"):
+    if os.environ.get("FAL_KEY"):
         return "sam3_fal"
     if os.environ.get("ROBOFLOW_API_KEY"):
         return "sam3_roboflow"
     if sam_api_key:
         return "sam3_fal"
+    if caps.get("cuda") and caps.get("transformers"):
+        return "grounding_dino"
     return "cc_zero_gpu"
 
 
-def resolve_matting_backend(requested: str = "auto", rmbg_model_path: str = "") -> str:
-    """Resolve effective matting backend (RMBG-2.0 -> open BiRefNet/rembg -> zero-GPU floodfill)."""
+def resolve_matting_backend(
+    requested: str = "auto",
+    rmbg_model_path: str = "",
+    *,
+    gpu_python: str = "",
+) -> str:
+    """Resolve effective Step 3 backend: RMBG-2.0 -> zero-token BiRefNet (CUDA) -> zero-GPU floodfill."""
     req = (requested or "auto").strip().lower()
     if req in ("rmbg2", "birefnet", "floodfill"):
         return req
-    if _rmbg2_local_ready(rmbg_model_path):
+
+    caps = probe_gpu_capabilities(gpu_python)
+    has_neural_deps = bool(caps.get("torch") and caps.get("transformers") and caps.get("kornia"))
+    if has_neural_deps and (
+        (rmbg_model_path and Path(rmbg_model_path).exists())
+        or _has_hf_cached_repo("briaai/RMBG-2.0")
+        or _get_hf_token()
+    ):
         return "rmbg2"
-    if _birefnet_or_rembg_ready():
+    if (caps.get("cuda") and has_neural_deps) or caps.get("rembg"):
         return "birefnet"
     return "floodfill"
 
 
+# ============================================================================
+# Step 2: Icon Segmentation & Strict VLM Filter -> `samed.png` + `boxlib.json`
+# ============================================================================
+
+
 def _get_label_font(box_width: int, box_height: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Exact AutoFigure-Edit dynamic label font for <AF>01 boxes."""
     min_dim = min(box_width, box_height)
     font_size = max(12, min(48, min_dim // 4))
     for fp in (
@@ -175,7 +261,6 @@ def _get_label_font(box_width: int, box_height: int) -> ImageFont.FreeTypeFont |
 
 
 def calculate_overlap_ratio(box1: dict[str, Any], box2: dict[str, Any]) -> float:
-    """Exact AutoFigure-Edit overlap ratio: intersection / min(area1, area2)."""
     x1 = max(box1["x1"], box2["x1"])
     y1 = max(box1["y1"], box2["y1"])
     x2 = min(box1["x2"], box2["x2"])
@@ -190,8 +275,8 @@ def calculate_overlap_ratio(box1: dict[str, Any], box2: dict[str, Any]) -> float
     return inter / float(min(a1, a2))
 
 
-def merge_overlapping_boxes(boxes: list[dict[str, Any]], overlap_threshold: float = 0.85) -> list[dict[str, Any]]:
-    """Iteratively merge overlapping detected boxes and assign canonical <AF>01..NN labels."""
+def merge_overlapping_boxes(boxes: list[dict[str, Any]], overlap_threshold: float = 0.80) -> list[dict[str, Any]]:
+    """Iteratively merge overlapping detected boxes and assign canonical `<AF>01`..`<AF>NN` labels."""
     if not boxes:
         return []
     working = [b.copy() for b in boxes]
@@ -206,7 +291,7 @@ def merge_overlapping_boxes(boxes: list[dict[str, Any]], overlap_threshold: floa
                 for j in range(i + 1, n):
                     if calculate_overlap_ratio(working[i], working[j]) >= overlap_threshold:
                         b1, b2 = working[i], working[j]
-                        best = b1 if b1.get("score", 0.0) >= b2.get("score", 0.0) else b2
+                        best = b1 if float(b1.get("score", 0.0)) >= float(b2.get("score", 0.0)) else b2
                         nb = {
                             "x1": min(b1["x1"], b2["x1"]),
                             "y1": min(b1["y1"], b2["y1"]),
@@ -216,14 +301,12 @@ def merge_overlapping_boxes(boxes: list[dict[str, Any]], overlap_threshold: floa
                             "prompt": best.get("prompt", "icon"),
                             "bg_mode": best.get("bg_mode", "auto"),
                             "rounded_rx": int(best.get("rounded_rx", 0)),
-                            "description": best.get("description", ""),
                         }
                         working = [working[k] for k in range(n) if k != i and k != j]
                         working.append(nb)
                         merged = True
                         break
 
-    # Deterministic reading-order sort (top-to-bottom row bands, left-to-right)
     working.sort(key=lambda b: (int(b["y1"]) // 60, int(b["x1"])))
 
     result: list[dict[str, Any]] = []
@@ -241,7 +324,6 @@ def merge_overlapping_boxes(boxes: list[dict[str, Any]], overlap_threshold: floa
                 "prompt": str(box.get("prompt", "icon")),
                 "bg_mode": str(box.get("bg_mode", "auto")),
                 "rounded_rx": int(box.get("rounded_rx", 0)),
-                "description": str(box.get("description", "")),
             }
         )
     return result
@@ -252,10 +334,9 @@ def draw_samed_placeholder_image(
     boxes: list[dict[str, Any]],
     output_path: Path,
 ) -> Path:
-    """Draw exact AutoFigure-Edit `samed.png`: #808080 gray fill, black 3px outline, white centered <AF>01."""
+    """Draw exact AutoFigure-Edit `samed.png`: `#808080` gray fill, black 3px outline, white centered `<AF>01`."""
     samed = figure_img.convert("RGB").copy()
     draw = ImageDraw.Draw(samed)
-
     for box in boxes:
         x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
         label = box["label"]
@@ -287,45 +368,46 @@ def _cxcywh_norm_to_xyxy(box: list | tuple, width: int, height: int) -> Optional
     return (x1, y1, x2, y2)
 
 
-def _run_sam3_local(
-    image: Image.Image,
-    prompt_list: list[str],
+def _run_gpu_worker_detection(
+    task: str,
+    figure_path: Path,
+    *,
+    prompts: list[str],
     min_score: float,
+    gpu_python: str = "",
+    hf_endpoint: str = "",
 ) -> list[dict[str, Any]]:
-    import sam3
-    import torch
-    from sam3.model.sam3_image_processor import Sam3Processor
-    from sam3.model_builder import build_sam3_image_model
+    ext_py = _should_use_external_gpu_python(gpu_python)
+    if ext_py is not None:
+        with tempfile.TemporaryDirectory() as td:
+            out_json = Path(td) / "boxes.json"
+            cmd = [
+                str(ext_py),
+                "-m",
+                "paper2svg.gpu_worker",
+                "--task",
+                task,
+                "--image",
+                str(figure_path),
+                "--prompts",
+                ",".join(prompts),
+                "--min-score",
+                str(min_score),
+                "--out",
+                str(out_json),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=_worker_env(hf_endpoint))
+            if proc.returncode != 0 or not out_json.is_file():
+                raise RuntimeError(f"GPU worker `{task}` failed: {(proc.stderr or proc.stdout)[-500:]}")
+            return json.loads(out_json.read_text(encoding="utf-8"))
 
-    sam3_dir = Path(sam3.__path__[0]) if hasattr(sam3, "__path__") else Path(sam3.__file__).parent
-    bpe_path = sam3_dir / "assets" / "bpe_simple_vocab_16e6.txt.gz"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = build_sam3_image_model(device=device, bpe_path=str(bpe_path) if bpe_path.exists() else None)
-    processor = Sam3Processor(model, device=device)
-    state = processor.set_image(image)
+    from .gpu_worker import run_grounding_dino_gpu, run_sam3_local_gpu
 
-    detected: list[dict[str, Any]] = []
-    for prompt in prompt_list:
-        out = processor.set_text_prompt(state=state, prompt=prompt)
-        boxes = out["boxes"].cpu().numpy() if isinstance(out["boxes"], torch.Tensor) else out["boxes"]
-        scores = out["scores"].cpu().numpy() if isinstance(out["scores"], torch.Tensor) else out["scores"]
-        for box, score in zip(boxes, scores):
-            if float(score) >= min_score:
-                detected.append(
-                    {
-                        "x1": int(box[0]),
-                        "y1": int(box[1]),
-                        "x2": int(box[2]),
-                        "y2": int(box[3]),
-                        "score": float(score),
-                        "prompt": prompt,
-                        "bg_mode": "auto",
-                    }
-                )
-    del model, processor
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    return detected
+    if hf_endpoint:
+        os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
+    if task == "sam3":
+        return run_sam3_local_gpu(figure_path, prompts, min_score=min_score)
+    return run_grounding_dino_gpu(figure_path)
 
 
 def _run_sam3_fal(
@@ -368,15 +450,7 @@ def _run_sam3_fal(
                 xyxy = _cxcywh_norm_to_xyxy(rb, w, h)
                 if xyxy:
                     detected.append(
-                        {
-                            "x1": xyxy[0],
-                            "y1": xyxy[1],
-                            "x2": xyxy[2],
-                            "y2": xyxy[3],
-                            "score": sc,
-                            "prompt": prompt,
-                            "bg_mode": "auto",
-                        }
+                        {"x1": xyxy[0], "y1": xyxy[1], "x2": xyxy[2], "y2": xyxy[3], "score": sc, "prompt": prompt}
                     )
     return detected
 
@@ -429,10 +503,71 @@ def _run_sam3_roboflow(
                                 "y2": min(h, int(max(ys))),
                                 "score": sc,
                                 "prompt": prompt,
-                                "bg_mode": "auto",
                             }
                         )
     return detected
+
+
+def vlm_filter_strict_icons(
+    client: Any,
+    figure_path: Path,
+    candidates: list[dict[str, Any]],
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    """Fast 10s low-effort multimodal filter that keeps ONLY pure non-text visual icons/photos/3D graphics
+    and drops every text card, arrow, or half-clipped fragment.
+    """
+    if not candidates:
+        return []
+    with Image.open(figure_path) as base_im:
+        rgba = base_im.convert("RGBA")
+        w, h = rgba.size
+
+    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    try:
+        fnt = ImageFont.truetype(r"C:\Windows\Fonts\arialbd.ttf", 16)
+    except OSError:
+        fnt = ImageFont.load_default()
+
+    for b in candidates:
+        idx = b["id"] + 1
+        x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
+        draw.rectangle([x1, y1, x2, y2], fill=(239, 68, 68, 38), outline=(220, 38, 38, 255), width=3)
+        tag = f"#{idx}"
+        tb = draw.textbbox((0, 0), tag, font=fnt)
+        draw.rectangle([x1, max(0, y1 - 20), x1 + (tb[2] - tb[0]) + 8, max(20, y1)], fill=(220, 38, 38, 235))
+        draw.text((x1 + 4, max(0, y1 - 19)), tag, fill=(255, 255, 255, 255), font=fnt)
+
+    cand_preview = output_dir / "samed_candidates.png"
+    Image.alpha_composite(rgba, overlay).convert("RGB").save(cand_preview, format="PNG")
+
+    prompt = f"""You are a STRICT semantic icon filter for AutoFigure-Edit.
+Image 1 is the clean figure. Image 2 shows {len(candidates)} numbered red candidate boxes (#1..#{len(candidates)}).
+
+KEEP ONLY boxes covering a **pure non-text visual icon / 3D graphic / photograph / waveform / heatmap / scatter plot / chart** with **ZERO readable words inside**:
+- KEEP: realistic photos (faces, chips, hardware), 3D voxel cubes/grids, cars/LiDAR, antenna towers, scatter/curve plots, waveforms, waterfalls, heatmaps, bar/radar charts, standalone icons (robot, calendar, document, books, database, signal antenna, magnifying glass, shield, satellite dish, gear, microchip, 3D cubes cluster, circular arrow WITHOUT swallowing words inside).
+- STRICTLY DROP:
+  * ANY box containing readable text words, titles, bullets, formulas, or card names!
+  * ANY box covering an arrow line, border line, or plain flat colored rectangle/timeline bar/1D token strip!
+  * ANY box that slices only half of an icon!
+
+Return ONLY a compact JSON object like: {{"keep_ids": [2, 3, 6]}}"""
+
+    raw = client.generate_multimodal(
+        [prompt, "Image 1 (clean):", figure_path, "Image 2 (red candidates):", cand_preview],
+        max_output_tokens=4000,
+        reasoning_effort="low",
+    )
+    m = re.search(r"\{[^{}]*keep_ids[^{}]*\}", raw, re.DOTALL) or re.search(r"\{[\s\S]*\}", raw)
+    if not m:
+        return candidates
+    try:
+        keep_set = {int(i) for i in json.loads(m.group(0)).get("keep_ids", [])}
+    except Exception:
+        return candidates
+    kept = [b for b in candidates if (b["id"] + 1) in keep_set]
+    return merge_overlapping_boxes(kept, overlap_threshold=0.72)
 
 
 def segment_icons_autofigure(
@@ -441,98 +576,79 @@ def segment_icons_autofigure(
     output_dir: Path,
     *,
     seg_backend: str = "auto",
-    sam_prompts: str = "icon,portrait,diagram,chart,object",
+    sam_prompts: str = "icon,person,robot,animal,diagram,chart",
     min_score: float = 0.45,
-    merge_threshold: float = 0.85,
+    merge_threshold: float = 0.80,
     sam_api_key: str = "",
     sam_max_masks: int = 32,
-    max_assets_cap: int = 16,
+    gpu_python: str = "",
+    hf_endpoint: str = "",
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> tuple[Path, Path, list[dict[str, Any]], str]:
     """Run AutoFigure-Edit Step 2 icon segmentation -> `samed.png` + `boxlib.json`."""
     with Image.open(figure_path) as im:
         fig_img = im.convert("RGB")
+    arr = np.asarray(fig_img, dtype=np.float32)
     w, h = fig_img.size
 
-    resolved = resolve_seg_backend(seg_backend, sam_api_key)
+    resolved = resolve_seg_backend(seg_backend, sam_api_key, gpu_python=gpu_python)
     prompt_list = [p.strip() for p in sam_prompts.split(",") if p.strip()] or ["icon"]
     if on_progress:
-        on_progress(f"AutoFigure Step 2: Segmenting visual assets via `{resolved}` ({w}x{h})...")
+        on_progress(f"Step 2: Segmenting visual icons via `{resolved}` ({w}x{h})...")
 
     raw_boxes: list[dict[str, Any]] = []
+    needs_vlm_filter = False
+
     if resolved == "sam3_local":
-        raw_boxes = _run_sam3_local(fig_img, prompt_list, min_score)
+        raw_boxes = _run_gpu_worker_detection(
+            "sam3", figure_path, prompts=prompt_list, min_score=min_score, gpu_python=gpu_python, hf_endpoint=hf_endpoint
+        )
     elif resolved == "sam3_fal":
         raw_boxes = _run_sam3_fal(fig_img, prompt_list, min_score, sam_api_key, sam_max_masks)
     elif resolved == "sam3_roboflow":
         raw_boxes = _run_sam3_roboflow(fig_img, prompt_list, min_score, sam_api_key)
-    elif resolved == "cc_zero_gpu":
-        raw_boxes = detect_icons_pixel_exact_cc(figure_path, max_assets=max_assets_cap)
-        # Fallback to VLM localizer only if CC finds < 2 objects (e.g., dark-background non-standard image)
-        if len(raw_boxes) < 2:
-            resolved = "vlm_zero_gpu"
-            extracted = detect_and_crop_visual_assets(
-                client, figure_path, output_dir, (w, h), max_assets=max_assets_cap
+    elif resolved == "grounding_dino":
+        try:
+            gd_boxes = _run_gpu_worker_detection(
+                "grounding_dino",
+                figure_path,
+                prompts=prompt_list,
+                min_score=min_score,
+                gpu_python=gpu_python,
+                hf_endpoint=hf_endpoint,
             )
-            raw_boxes = [
-                {
-                    "x1": max(0, int(round(a.svg_x))),
-                    "y1": max(0, int(round(a.svg_y))),
-                    "x2": min(w, int(round(a.svg_x + a.svg_w))),
-                    "y2": min(h, int(round(a.svg_y + a.svg_h))),
-                    "score": 1.0,
-                    "prompt": a.bg_mode,
-                    "bg_mode": a.bg_mode,
-                    "rounded_rx": a.rounded_rx,
-                    "description": a.description,
-                }
-                for a in extracted
-                if (a.svg_w >= 12 and a.svg_h >= 12)
-            ]
+            cc_boxes = detect_cc_frame_stripped(fig_img)
+            raw_boxes = gd_boxes + cc_boxes
+            needs_vlm_filter = True
+        except Exception as exc:
+            if on_progress:
+                on_progress(f"Step 2: Local GroundingDINO failed ({exc}); falling back to `cc_zero_gpu`...")
+            resolved = "cc_zero_gpu"
+            raw_boxes = detect_cc_frame_stripped(fig_img)
+            needs_vlm_filter = True
     else:
-        # Explicit vlm_zero_gpu mode
-        extracted = detect_and_crop_visual_assets(
-            client,
-            figure_path,
-            output_dir,
-            (w, h),
-            max_assets=max_assets_cap,
-        )
-        for a in extracted:
-            x1 = max(0, int(round(a.svg_x)))
-            y1 = max(0, int(round(a.svg_y)))
-            x2 = min(w, int(round(a.svg_x + a.svg_w)))
-            y2 = min(h, int(round(a.svg_y + a.svg_h)))
-            if x2 - x1 >= 12 and y2 - y1 >= 12:
-                raw_boxes.append(
-                    {
-                        "x1": x1,
-                        "y1": y1,
-                        "x2": x2,
-                        "y2": y2,
-                        "score": 1.0,
-                        "prompt": a.bg_mode,
-                        "bg_mode": a.bg_mode,
-                        "rounded_rx": a.rounded_rx,
-                        "description": a.description,
-                    }
-                )
+        raw_boxes = detect_cc_frame_stripped(fig_img)
+        needs_vlm_filter = True
 
-    # Filter giant full-canvas false positives (> 65% of entire canvas area)
     canvas_area = float(max(1, w * h))
     filtered = [
         b
         for b in raw_boxes
-        if (b["x2"] - b["x1"]) >= 14
-        and (b["y2"] - b["y1"]) >= 14
-        and ((b["x2"] - b["x1"]) * (b["y2"] - b["y1"])) / canvas_area <= 0.65
+        if (b["x2"] - b["x1"]) >= 16
+        and (b["y2"] - b["y1"]) >= 16
+        and ((b["x2"] - b["x1"]) * (b["y2"] - b["y1"])) / canvas_area <= 0.45
     ]
 
-    valid_boxes = merge_overlapping_boxes(filtered, overlap_threshold=merge_threshold)
-    samed_path = draw_samed_placeholder_image(fig_img, valid_boxes, output_dir / "samed.png")
-    # Keep Web UI alias synchronized
-    shutil.copyfile(samed_path, output_dir / "stage1_draft_masked.png")
+    merged = merge_overlapping_boxes(filtered, overlap_threshold=0.60 if needs_vlm_filter else merge_threshold)
+    stripped = [strip_text_edges_on_box(arr, b) for b in merged]
+    valid_boxes = merge_overlapping_boxes(stripped, overlap_threshold=0.65 if needs_vlm_filter else merge_threshold)
 
+    if needs_vlm_filter and valid_boxes and client is not None:
+        if on_progress:
+            on_progress(f"Step 2: VLM semantic icon filter auditing {len(valid_boxes)} candidate box(es)...")
+        valid_boxes = vlm_filter_strict_icons(client, figure_path, valid_boxes, output_dir)
+
+    samed_path = draw_samed_placeholder_image(fig_img, valid_boxes, output_dir / "samed.png")
     boxlib_data = {
         "image_size": {"width": w, "height": h},
         "seg_backend": resolved,
@@ -546,76 +662,56 @@ def segment_icons_autofigure(
 
 
 # ============================================================================
-# Step 3: Pluggable Matting (RMBG-2.0 / BiRefNet / Zero-GPU FloodFill)
+# Step 3: Photo-Protected Batch Neural Matting (RMBG-2.0 / BiRefNet / FloodFill)
 # ============================================================================
 
 
-def _looks_like_opaque_photo_tile(crop_img: Image.Image) -> bool:
-    """Detect whether a cropped tile is a rectangular photograph/heatmap (should NOT have its
-    studio backdrop chewed away by matting) vs an icon/diagram on a uniform card/white canvas.
-    """
-    rgb = np.asarray(crop_img.convert("RGB"), dtype=np.float32)
-    h, w, _ = rgb.shape
-    if h < 16 or w < 16:
-        return False
-    border = np.concatenate([rgb[0, :, :], rgb[h - 1, :, :], rgb[:, 0, :], rgb[:, w - 1, :]], axis=0)
-    med = np.median(border, axis=0)
-    # If border is bright neutral white/near-white or soft light pastel (>215 luminance) AND uniform -> diagram/icon!
-    lum = float(0.299 * med[0] + 0.587 * med[1] + 0.114 * med[2])
-    dists = np.linalg.norm(border - med, axis=1)
-    uniform_ratio = float(np.mean(dists < 22.0))
-    if uniform_ratio >= 0.55 and lum >= 205.0:
-        return False
-    # Photographic portrait/scene/spectrogram borders have varied colors or darker natural backdrop
-    if uniform_ratio < 0.45:
-        return True
-    # Check if top/bottom/left/right corners differ significantly (photographic gradient/background)
-    corners = np.array([rgb[2, 2], rgb[2, w - 3], rgb[h - 3, 2], rgb[h - 3, w - 3]])
-    corner_spread = float(np.max(np.linalg.norm(corners - med, axis=1)))
-    return corner_spread > 38.0
+def _run_gpu_worker_matting(
+    pairs: list[tuple[Path, Path]],
+    *,
+    backend: str,
+    rmbg_model_path: str = "",
+    gpu_python: str = "",
+    hf_endpoint: str = "",
+) -> int:
+    if not pairs:
+        return 0
+    ext_py = _should_use_external_gpu_python(gpu_python)
+    if ext_py is not None:
+        with tempfile.TemporaryDirectory() as td:
+            man_path = Path(td) / "matte_manifest.json"
+            man_path.write_text(
+                json.dumps([{"src": str(s), "dst": str(d)} for s, d in pairs], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            cmd = [
+                str(ext_py),
+                "-m",
+                "paper2svg.gpu_worker",
+                "--task",
+                backend,
+                "--manifest",
+                str(man_path),
+                "--rmbg-model-path",
+                rmbg_model_path,
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=_worker_env(hf_endpoint))
+            if proc.returncode != 0:
+                raise RuntimeError(f"GPU worker matting `{backend}` failed: {(proc.stderr or proc.stdout)[-500:]}")
+            return len(pairs)
 
-
-def _load_neural_matte_fn(backend: str, rmbg_model_path: str = "") -> Callable[[Image.Image], Image.Image]:
-    """Load neural background remover (RMBG-2.0 or BiRefNet / rembg)."""
     if backend == "birefnet" and importlib.util.find_spec("rembg") is not None:
         import rembg
 
-        def _rembg_fn(img: Image.Image) -> Image.Image:
-            return rembg.remove(img.convert("RGBA"))
+        for src, dst in pairs:
+            rembg.remove(Image.open(src).convert("RGBA")).save(dst, format="PNG")
+        return len(pairs)
 
-        return _rembg_fn
+    from .gpu_worker import run_neural_matting_batch_gpu
 
-    import torch
-    from torchvision import transforms
-    from transformers import AutoModelForImageSegmentation
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    hf_token = _get_hf_token()
-    if backend == "rmbg2":
-        repo = rmbg_model_path if (rmbg_model_path and Path(rmbg_model_path).exists()) else "briaai/RMBG-2.0"
-        model = AutoModelForImageSegmentation.from_pretrained(repo, trust_remote_code=True, token=hf_token).eval().to(device)
-    else:
-        model = AutoModelForImageSegmentation.from_pretrained("ZhengPeng7/BiRefNet", trust_remote_code=True).eval().to(device)
-
-    tf = transforms.Compose(
-        [
-            transforms.Resize((1024, 1024)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-    )
-
-    def _torch_matte(img: Image.Image) -> Image.Image:
-        rgb = img.convert("RGB")
-        inp = tf(rgb).unsqueeze(0).to(device)
-        with torch.no_grad():
-            preds = model(inp)[-1].sigmoid().cpu()
-        mask = transforms.ToPILImage()(preds[0].squeeze()).resize(rgb.size)
-        out = rgb.copy()
-        out.putalpha(mask)
-        return out
-
-    return _torch_matte
+    if hf_endpoint:
+        os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
+    return run_neural_matting_batch_gpu(pairs, backend=backend, rmbg_model_path=rmbg_model_path)
 
 
 def crop_and_matte_icons(
@@ -625,91 +721,118 @@ def crop_and_matte_icons(
     *,
     matting_backend: str = "auto",
     rmbg_model_path: str = "",
+    gpu_python: str = "",
+    hf_endpoint: str = "",
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    """Run AutoFigure-Edit Step 3: Crop boxes and remove backgrounds cleanly."""
+    """Run AutoFigure-Edit Step 3: Crop boxes, protect real photos (`opaque_rect`), and batch-matte transparent icons."""
     icons_dir = output_dir / "icons"
     icons_dir.mkdir(parents=True, exist_ok=True)
-    resolved = resolve_matting_backend(matting_backend, rmbg_model_path)
+    resolved = resolve_matting_backend(matting_backend, rmbg_model_path, gpu_python=gpu_python)
 
     if not boxes:
         return [], resolved
 
     if on_progress:
-        on_progress(f"AutoFigure Step 3: Cropping & matting {len(boxes)} visual asset(s) via `{resolved}`...")
-
-    neural_fn: Optional[Callable[[Image.Image], Image.Image]] = None
-    if resolved in ("rmbg2", "birefnet"):
-        try:
-            neural_fn = _load_neural_matte_fn(resolved, rmbg_model_path)
-        except Exception:
-            resolved = "floodfill"
-            neural_fn = None
+        on_progress(f"Step 3: Cropping & matting {len(boxes)} visual icon(s) via `{resolved}`...")
 
     with Image.open(figure_path) as im:
         fig_img = im.convert("RGB")
 
+    # First pass: crop all boxes, separate opaque photo tiles from transparent-background icons
     icon_infos: list[dict[str, Any]] = []
+    neural_batch: list[tuple[int, Path, Path]] = []
+
     for box in boxes:
         label = box["label"]
         label_clean = box.get("label_clean") or label.replace("<", "").replace(">", "")
         x1, y1, x2, y2 = int(box["x1"]), int(box["y1"]), int(box["x2"]), int(box["y2"])
         cropped = fig_img.crop((x1, y1, x2, y2))
         crop_path = icons_dir / f"icon_{label_clean}.png"
+        nobg_path = icons_dir / f"icon_{label_clean}_nobg.png"
         cropped.save(crop_path, format="PNG")
 
         bg_mode = str(box.get("bg_mode", "auto")).lower()
-        is_opaque_photo = (bg_mode == "opaque_rect") or (
-            bg_mode == "auto" and _looks_like_opaque_photo_tile(cropped)
-        )
+        is_opaque_photo = (bg_mode == "opaque_rect") or (bg_mode == "auto" and looks_like_opaque_photo_tile(cropped))
 
-        adj_x1, adj_y1, adj_x2, adj_y2 = x1, y1, x2, y2
+        info = {
+            "id": box["id"],
+            "label": label,
+            "label_clean": label_clean,
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "width": max(1, x2 - x1),
+            "height": max(1, y2 - y1),
+            "orig_x1": x1,
+            "orig_y1": y1,
+            "orig_width": max(1, x2 - x1),
+            "orig_height": max(1, y2 - y1),
+            "bg_mode": "opaque_rect" if is_opaque_photo else "remove_bg",
+            "rounded_rx": int(box.get("rounded_rx", 4 if is_opaque_photo else 0)),
+            "crop_path": str(crop_path),
+            "nobg_path": str(nobg_path),
+        }
+
         if is_opaque_photo:
-            nobg_img = cropped.convert("RGBA")
-        elif neural_fn is not None:
-            nobg_img = neural_fn(cropped)
+            cropped.convert("RGBA").save(nobg_path, format="PNG")
+        elif resolved in ("rmbg2", "birefnet"):
+            # Pre-strip any tiny edge caption sliver before neural matting
+            stripped, trims = strip_edge_text_bleed(cropped)
+            if trims != (0, 0, 0, 0):
+                stripped.convert("RGB").save(crop_path, format="PNG")
+                info["x1"] += trims[0]
+                info["y1"] += trims[1]
+                info["x2"] -= trims[2]
+                info["y2"] -= trims[3]
+                info["width"] = max(1, info["x2"] - info["x1"])
+                info["height"] = max(1, info["y2"] - info["y1"])
+            neural_batch.append((len(icon_infos), crop_path, nobg_path))
         else:
             stripped, bleed_trims = strip_edge_text_bleed(cropped)
-            adj_x1 += bleed_trims[0]
-            adj_y1 += bleed_trims[1]
-            adj_x2 -= bleed_trims[2]
-            adj_y2 -= bleed_trims[3]
             nobg_img, ff_trims = smart_remove_border_background(stripped)
-            adj_x1 += ff_trims[0]
-            adj_y1 += ff_trims[1]
-            adj_x2 -= ff_trims[2]
-            adj_y2 -= ff_trims[3]
+            nobg_img.save(nobg_path, format="PNG")
+            info["x1"] += bleed_trims[0] + ff_trims[0]
+            info["y1"] += bleed_trims[1] + ff_trims[1]
+            info["x2"] -= bleed_trims[2] + ff_trims[2]
+            info["y2"] -= bleed_trims[3] + ff_trims[3]
+            info["width"] = max(1, info["x2"] - info["x1"])
+            info["height"] = max(1, info["y2"] - info["y1"])
 
-        nobg_path = icons_dir / f"icon_{label_clean}_nobg.png"
-        nobg_img.save(nobg_path, format="PNG")
+        icon_infos.append(info)
 
-        icon_infos.append(
-            {
-                "id": box["id"],
-                "label": label,
-                "label_clean": label_clean,
-                "x1": adj_x1,
-                "y1": adj_y1,
-                "x2": adj_x2,
-                "y2": adj_y2,
-                "width": max(1, adj_x2 - adj_x1),
-                "height": max(1, adj_y2 - adj_y1),
-                "orig_x1": x1,
-                "orig_y1": y1,
-                "orig_width": max(1, x2 - x1),
-                "orig_height": max(1, y2 - y1),
-                "bg_mode": "opaque_rect" if is_opaque_photo else "remove_bg",
-                "rounded_rx": int(box.get("rounded_rx", 0)),
-                "crop_path": str(crop_path),
-                "nobg_path": str(nobg_path),
-            }
-        )
+    # Single batched GPU matting call for all non-photo icons (loads weights ONCE!)
+    if neural_batch:
+        try:
+            _run_gpu_worker_matting(
+                [(src, dst) for _, src, dst in neural_batch],
+                backend=resolved,
+                rmbg_model_path=rmbg_model_path,
+                gpu_python=gpu_python,
+                hf_endpoint=hf_endpoint,
+            )
+        except Exception as exc:
+            if on_progress:
+                on_progress(f"Step 3: Neural matting `{resolved}` failed ({exc}); falling back to zero-GPU `floodfill`...")
+            resolved = "floodfill"
+            for idx, src, dst in neural_batch:
+                im_crop = Image.open(src).convert("RGB")
+                nobg_img, ff_trims = smart_remove_border_background(im_crop)
+                nobg_img.save(dst, format="PNG")
+                info = icon_infos[idx]
+                info["x1"] += ff_trims[0]
+                info["y1"] += ff_trims[1]
+                info["x2"] -= ff_trims[2]
+                info["y2"] -= ff_trims[3]
+                info["width"] = max(1, info["x2"] - info["x1"])
+                info["height"] = max(1, info["y2"] - info["y1"])
 
     return icon_infos, resolved
 
 
 # ============================================================================
-# Step 4: Razor-Clean AutoFigure-Edit `<AF>01` Template SVG Reconstruction
+# Step 4: Clean AutoFigure-Edit `<AF>01` Template SVG Reconstruction
 # ============================================================================
 
 
@@ -721,36 +844,24 @@ def generate_autofigure_svg_template(
     output_path: Path,
     *,
     font_family: str = "Inter, Helvetica, Arial, sans-serif",
-    exact_text_inventory: Optional[list[str]] = None,
-    resolved_density: str = "concise",
 ) -> str:
-    """Exact AutoFigure-Edit Step 4 (`generate_svg_template`): focused, distraction-free pixel replication."""
+    """Exact AutoFigure-Edit Step 4 (`template.svg`) with deterministic arrow & box-fit guardrails."""
     with Image.open(figure_path) as im:
         w, h = im.size
 
-    min_pt = 4.3 if resolved_density == "detailed" else 6.4
-    min_px = int(math.ceil(min_pt * float(w) / TWO_COLUMN_WIDTH_PT))
-
-    no_icon_mode = len(boxes) == 0
-    spelling_block = (
-        "\nEXACT SPELLING REFERENCE (use these exact spellings for matching visible labels; do NOT add unshown text):\n"
-        + json.dumps(exact_text_inventory, ensure_ascii=False)
-        if exact_text_inventory
-        else ""
-    )
-
-    if no_icon_mode:
+    if not boxes:
         prompt = f"""Write clean, editable SVG code to achieve pixel-level faithful replication of Image 1 (`figure.png`).
 
-CRITICAL DIMENSION REQUIREMENT:
-- Original image dimensions: {w} x {h} pixels.
-- Your SVG root tag MUST be:
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`
-- Replicate EVERY shape, panel, text label (using `{font_family}`, minimum `font-size >= {min_px}px`), arrow (exact direction, color, thickness, arrowhead), border, and color with exact visual parity.
-- Do NOT add any gray `<AF>01` placeholder boxes.
-{spelling_block}
+CRITICAL ENGINEERING RULES:
+1. Exact 1:1 dimensions: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`.
+2. **CLEAN ARROWS (NEVER COLLAPSE INTO WEDGES!)**:
+   - Thin arrows: use `<line ... marker-end="url(#arrow)"/>` or open `<polyline fill="none" ... marker-end="url(#arrow)"/>`.
+   - Thick block arrows: use a proper **7-point symmetric closed `<polygon>`**. NEVER write `M...h...l...v...z` in one short `<path>`!
+3. **FIT ALL TEXT INSIDE ITS BOX**: Match Image 1's font-family (serif vs sans, default `{font_family}`), weights, and compact font-sizes so EVERY label fits cleanly inside its enclosing `<rect>` with >= 6px horizontal margin.
+4. **CLEAN SUBSCRIPTS**: Reset baseline after every `<tspan dy="4">` via `<tspan dy="-4">`.
+5. Do NOT add any gray `<AF>01` placeholder boxes.
 
-Output ONLY the complete valid SVG code starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
+Output ONLY valid SVG starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
     else:
         coord_lines = "\n".join(
             f"- {b['label_clean']} ({b['label']}): x={b['x1']}, y={b['y1']}, width={b['x2'] - b['x1']}, height={b['y2'] - b['y1']}"
@@ -758,39 +869,35 @@ Output ONLY the complete valid SVG code starting with `<svg` and ending with `</
         )
         prompt = f"""Write clean, editable SVG code to achieve **pixel-level faithful replication** of Image 1 (`figure.png`), replacing ONLY the icon/image areas covered by gray boxes in Image 2 (`samed.png`) with exact `<g id="AF..">` placeholders!
 
-CRITICAL DIMENSION REQUIREMENT:
-- Original image dimensions: {w} x {h} pixels.
-- Your SVG root tag MUST be:
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`
-- DO NOT scale or resize the coordinate system.
-
-EXACT PLACEHOLDER REQUIREMENT (matching Image 2 `samed.png`):
-- For EVERY gray placeholder `<AF>01`, `<AF>02`, ... listed below, emit an exact `<g id="AF01">` group using the exact pixel coordinates:
+CRITICAL ENGINEERING RULES:
+1. Exact 1:1 dimensions: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`.
+2. **EXACT `<g id="AF..">` PLACEHOLDERS** (matching Image 2 `samed.png`):
 ```xml
 <g id="AF01">
   <rect x="100" y="50" width="80" height="80" fill="#808080" stroke="black" stroke-width="2"/>
   <text x="140" y="90" text-anchor="middle" dominant-baseline="middle" fill="white" font-size="16">&lt;AF&gt;01</text>
 </g>
 ```
-- **ZERO DUPLICATE VECTOR ARTWORK BEHIND PLACEHOLDERS**: NEVER draw vector shapes, 3D slab edges, polygons, or duplicate lines INSIDE or BEHIND any `<g id="AF..">` area — our next step pastes the real transparent PNG there, so anything drawn behind it will peek out as ugly ghost lines! (Only clean flat background panel fills are allowed behind icons sitting inside a tinted zone.)
-- **CLEAN ARROWS ONLY (ZERO STRAY STUBS!)**: Replicate every meaningful connector cleanly from exact source edge to exact target edge with exact direction (`UP`/`DOWN`/`LEFT`/`RIGHT`). If Image 1 has any tiny accidental stub arrow pointing into empty space or pointing at a floating title, **OMIT IT**!
-- **CRISP TYPOGRAPHY & CLEAN SUBSCRIPTS**: Use `font-family="{font_family}"`, minimum `font-size >= {min_px}px`, and render mathematical subscripts using real `<tspan font-size="72%" dy="5">...</tspan>` (NEVER literal underscores like `c_sem` or `x_0`!). Keep EVERY `<text>` cleanly separated from every `<g id="AF..">` box with zero collision!
-- Escape XML entities strictly (`&amp;`, `&lt;`, `&gt;`). NEVER use `textLength` squashing.
+   **ZERO DUPLICATE ARTWORK BEHIND PLACEHOLDERS**: Never draw icons, 3D cubes, or lines behind any `<g id="AF..">` box.
+3. **CLEAN ARROWS (NEVER COLLAPSE INTO WEDGES!)**:
+   - Thin arrows: ALWAYS use `<line ... marker-end="url(#arrow)"/>` or open `<polyline fill="none" ... marker-end="url(#arrow)"/>`.
+   - Thick block arrows: ALWAYS draw a proper **7-point symmetric closed `<polygon>`** (top shaft -> head base -> wing -> tip -> opposite wing -> head base -> bottom shaft). **NEVER combine a shaft + head + `z` in one short `<path d="M...h...l...v...z"/>`!**
+4. **FIT ALL TEXT INSIDE ITS BOX**: Match Image 1's font-family (serif vs sans, fallback `{font_family}`), weights, and compact font-sizes so EVERY label fits cleanly INSIDE its enclosing `<rect>` with >= 6px horizontal margin and ZERO overlap against any `<g id="AF..">` placeholder!
+5. **CLEAN SUBSCRIPTS**: Reset baseline after every `<tspan dy="4">` via `<tspan dy="-4">`. Escape XML entities strictly (`&amp;`, `&lt;`, `&gt;`).
 
 EXACT PLACEHOLDER COORDINATES ({len(boxes)} boxes):
 {coord_lines}
-{spelling_block}
 
-Output ONLY the complete valid SVG code starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
+Output ONLY valid SVG starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
 
     base_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "medium")
     svg_eff = resolve_stage_effort(base_eff, "medium")
     raw = client.generate_multimodal(
         [
             prompt,
-            f"Image 1 — Original Target Figure (`figure.png`, {w}x{h}):",
+            f"Image 1 — Target Figure (`figure.png`, {w}x{h}):",
             figure_path,
-            f"Image 2 — Icon Placeholder Reference (`samed.png`, {w}x{h}):",
+            f"Image 2 — Icon Placeholders (`samed.png`, {w}x{h}):",
             samed_path,
         ],
         max_output_tokens=48000,
@@ -799,19 +906,20 @@ Output ONLY the complete valid SVG code starting with `<svg` and ending with `</
     )
     svg_code = normalize_svg_root(extract_svg_block(raw), w, h)
     if not svg_code:
-        raise RuntimeError(f"AutoFigure template generation returned no <svg> block. Preview: {raw[:400]}")
+        raise RuntimeError(f"AutoFigure Step 4 returned no <svg> block. Preview: {raw[:400]}")
 
     ok, errs = validate_svg_xml(svg_code)
     if not ok:
         svg_code = fix_svg_xml_with_llm(client, svg_code, errs, width=w, height=h)
 
+    svg_code, _ = postprocess_svg_deterministic(svg_code)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(svg_code, encoding="utf-8")
     return svg_code
 
 
 # ============================================================================
-# Step 4.6: AutoFigure-Edit Visual Template Optimization (via Windows resvg-py)
+# Step 4.6: Template Alignment Optimization (Windows Zero-DLL `resvg-py`)
 # ============================================================================
 
 
@@ -832,12 +940,10 @@ def optimize_autofigure_template(
     boxes: list[dict[str, Any]],
     output_dir: Path,
     *,
-    max_iterations: int = 2,
+    max_iterations: int = 1,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Exact AutoFigure-Edit Step 4.6 (`optimize_svg_with_llm`) running on compact `template.svg`
-    using Windows zero-DLL `resvg-py` instead of `cairosvg`.
-    """
+    """Upstream AutoFigure-Edit Step 4.6 running on `template.svg` via Windows zero-DLL `resvg-py`."""
     with Image.open(figure_path) as im:
         w, h = im.size
 
@@ -851,51 +957,31 @@ def optimize_autofigure_template(
 
     for r in range(1, max_iterations + 1):
         if on_progress:
-            on_progress(f"AutoFigure Optimize Round {r}/{max_iterations}: Rendering template via resvg-py...")
+            on_progress(f"Step 4.6 (Template Align {r}/{max_iterations}): Rendering template via resvg-py...")
 
         iter_svg = output_dir / f"iter_{r - 1}.svg"
         iter_png = output_dir / f"iter_{r - 1}_full.png"
         iter_svg.write_text(current_svg, encoding="utf-8")
         renderer_used = render_svg_to_png(current_svg, iter_png, width=min(w, 3840))
 
-        if no_icon_mode:
-            opt_prompt = f"""You are an expert SVG optimizer (AutoFigure-Edit). Compare Image 3 (our current SVG rendered as PNG) against Image 1 (`figure.png`, original target) and fix EVERY visual alignment or style discrepancy.
+        placeholder_rule = (
+            "- No icon placeholders exist; keep pure vector layout clean."
+            if no_icon_mode
+            else f"- Keep ALL {len(boxes)} `<g id=\"AF01\">`..`<g id=\"AF{len(boxes):02d}\">` placeholders intact (`#808080`, black border) and delete any vector art drawn behind them."
+        )
+        opt_prompt = f"""You are an expert SVG alignment optimizer (AutoFigure-Edit).
+Compare Image 3 (current SVG rendered as PNG) against Image 1 (`figure.png`, target) and Image 2 (`samed.png`, icon placeholders).
+Fix EVERY position/alignment/style mismatch across 8 checks:
+- POSITION: (1) Icon `<AF>` alignment, (2) Text placement with zero overlaps/clipping, (3) Arrow endpoints & exact direction (`UP`/`DOWN`/`LEFT`/`RIGHT`), (4) Borders & dividers.
+- STYLE: (5) Placeholder proportions, (6) Font family/sizes/weights matching Image 1, (7) Clean arrows (NEVER collapsed `M...h...l...v...z` wedges!), (8) Panel fills & stroke widths.
+{placeholder_rule}
 
-Check and fix ALL 8 points:
-## POSITION: (1) Graphics alignment, (2) Text positions & zero overlaps/clipping, (3) Arrow endpoints & exact directions (UP/DOWN/LEFT/RIGHT!), (4) Borders & dividers.
-## STYLE: (5) Graphic proportions, (6) Font sizes, weights & dark crisp contrast, (7) Arrow thicknesses & colors, (8) Border colors & stroke widths.
-
-CURRENT SVG CODE:
+CURRENT SVG:
 ```xml
 {current_svg}
 ```
 
-Output ONLY the complete optimized SVG code starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
-        else:
-            opt_prompt = f"""You are an expert SVG optimizer (AutoFigure-Edit). Compare Image 3 (our current template SVG rendered as PNG) against Image 1 (`figure.png`, target figure) and Image 2 (`samed.png`, target icon placeholders `<AF>01`..`<AF>{len(boxes):02d}`) and refine the SVG to match with pixel-level precision!
-
-Check and fix **TWO MAJOR ASPECTS with EIGHT KEY POINTS**:
-## ASPECT 1: POSITION
-1. **Icons (`<g id="AF..">`)**: Are every gray placeholder's `(x, y, width, height)` aligned pixel-for-pixel with Image 2 (`samed.png`)?
-2. **Text**: Are ALL text labels properly centered/aligned with ZERO overlap against placeholders, arrows, or borders, and ZERO clipping outside `[0, {w}] x [0, {h}]`?
-3. **Arrows**: Check EVERY arrow's exact start/end point AND arrowhead direction (`UP` vs `DOWN`, `LEFT` vs `RIGHT`) against Image 1! Fix ANY inverted, crooked, missing, or colliding arrow!
-4. **Lines/Borders**: Are containers, dividers, and panels cleanly aligned to Image 1?
-
-## ASPECT 2: STYLE
-5. **Icons**: Keep EVERY `<g id="AF01">` .. `<g id="AF{len(boxes):02d}">` placeholder intact (`fill="#808080"`, `stroke="black"`, centered `&lt;AF&gt;..` text). NEVER delete any placeholder AND **REMOVE any duplicate vector shapes/slab-edges/polygons drawn behind or inside an `<AF>` box**!
-6. **Text**: Match Image 1's font sizes, bold weights, and crisp ink colors (NO `textLength` squashing!).
-7. **Arrows**: Match Image 1's arrow styles, thicknesses, arrowheads, and colors.
-8. **Lines/Borders**: Match Image 1's subtle fills, corner radii, and stroke widths.
-
-CURRENT SVG CODE:
-```xml
-{current_svg}
-```
-
-Output ONLY the complete optimized SVG code starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
-
-        if on_progress:
-            on_progress(f"AutoFigure Optimize Round {r}/{max_iterations}: Consulting {client.settings.main_model}...")
+Output ONLY valid SVG starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
 
         base_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "medium")
         opt_eff = resolve_stage_effort(base_eff, "medium")
@@ -903,11 +989,11 @@ Output ONLY the complete optimized SVG code starting with `<svg` and ending with
             raw = client.generate_multimodal(
                 [
                     opt_prompt,
-                    f"Image 1 — Original Target Figure (`figure.png`, {w}x{h}):",
+                    f"Image 1 — Target (`figure.png`, {w}x{h}):",
                     figure_path,
-                    f"Image 2 — Icon Placeholder Reference (`samed.png`, {w}x{h}):",
+                    f"Image 2 — Placeholders (`samed.png`, {w}x{h}):",
                     samed_path,
-                    f"Image 3 — Current Template SVG Render (`iter_{r - 1}_full.png`):",
+                    f"Image 3 — Current Render (`iter_{r - 1}_full.png`):",
                     iter_png,
                 ],
                 max_output_tokens=48000,
@@ -915,56 +1001,41 @@ Output ONLY the complete optimized SVG code starting with `<svg` and ending with
                 reasoning_effort=opt_eff,
             )
         except Exception as exc:
-            round_logs.append(
-                {
-                    "round": r,
-                    "renderer": renderer_used,
-                    "accepted": False,
-                    "reject_reason": f"Upstream API error during optimize round {r}: {exc}",
-                }
-            )
+            round_logs.append({"round": f"template_{r}", "renderer": renderer_used, "accepted": False, "reject_reason": str(exc)})
             break
 
         candidate = normalize_svg_root(extract_svg_block(raw), w, h)
         accepted = False
         reject_reason = ""
         if not candidate:
-            reject_reason = "No <svg> block extracted from optimization reply."
+            reject_reason = "No <svg> block extracted."
         else:
             ok, errs = validate_svg_xml(candidate)
             if not ok:
                 candidate = fix_svg_xml_with_llm(client, candidate, errs, width=w, height=h)
                 ok, errs = validate_svg_xml(candidate)
             if not ok:
-                reject_reason = f"Invalid XML after repair: {errs[:2]}"
+                reject_reason = f"Invalid XML: {errs[:2]}"
             else:
-                kept, missing = _count_af_placeholders(candidate, boxes)
+                _, missing = _count_af_placeholders(candidate, boxes)
                 if boxes and len(missing) > max(0, int(len(boxes) * 0.2)):
-                    reject_reason = f"Optimization dropped too many <AF> placeholders ({missing}); keeping previous template."
+                    reject_reason = f"Dropped too many <AF> placeholders ({missing})."
                 else:
-                    current_svg = candidate
+                    current_svg, _ = postprocess_svg_deterministic(candidate)
                     accepted = True
 
-        round_logs.append(
-            {
-                "round": r,
-                "renderer": renderer_used,
-                "accepted": accepted,
-                "reject_reason": reject_reason,
-            }
-        )
+        round_logs.append({"round": f"template_{r}", "renderer": renderer_used, "accepted": accepted, "reject_reason": reject_reason})
 
     (output_dir / "optimized_template.svg").write_text(current_svg, encoding="utf-8")
     return current_svg, round_logs
 
 
 # ============================================================================
-# Step 5: Exact AutoFigure-Edit Coordinate-Aligned Icon Replacement
+# Step 5: Deterministic Coordinate-Aligned Icon Replacement
 # ============================================================================
 
 
 def get_svg_dimensions(svg_code: str) -> tuple[Optional[float], Optional[float]]:
-    """Extract SVG coordinate dimensions from viewBox or width/height (exact AutoFigure-Edit logic)."""
     m = re.search(r'viewBox=["\']([^"\']+)["\']', svg_code, re.IGNORECASE)
     if m:
         parts = re.split(r"[\s,]+", m.group(1).strip())
@@ -1026,15 +1097,12 @@ def replace_icons_in_svg(
                 f'href="{data_uri}"{clip_attr} preserveAspectRatio="xMidYMid meet"/>'
             )
 
-        # Compute exact adjusted pixel offset inside the original placeholder box (if trim shifted it)
         dx_trim = (info["x1"] - info.get("orig_x1", info["x1"])) * scale_x
         dy_trim = (info["y1"] - info.get("orig_y1", info["y1"])) * scale_y
         trim_w_ratio = info["width"] / float(max(1, info.get("orig_width", info["width"])))
         trim_h_ratio = info["height"] / float(max(1, info.get("orig_height", info["height"])))
 
         replaced = False
-
-        # Method 1: Match `<g id="AF01">...</g>`
         g_pattern = rf'<g[^>]*\bid=["\']?{re.escape(label_clean)}["\']?[^>]*>[\s\S]*?</g>'
         g_match = re.search(g_pattern, svg_content, re.IGNORECASE)
         if g_match:
@@ -1047,7 +1115,6 @@ def replace_icons_in_svg(
             )
             if t_match:
                 tx, ty = float(t_match.group(1)), float(t_match.group(2))
-
             rect_m = re.search(r"<rect\b[^>]*>", g_block, re.IGNORECASE)
             if rect_m:
                 r_tag = rect_m.group(0)
@@ -1063,7 +1130,6 @@ def replace_icons_in_svg(
                     svg_content = svg_content.replace(g_block, _make_image_tag(rx, ry, rw, rh), 1)
                     replaced = True
 
-        # Method 2: Match `<text>&lt;AF&gt;01</text>` near a `<rect>`
         if not replaced and label:
             for tp in (
                 rf"<text[^>]*>[^<]*{re.escape(label)}[^<]*</text>",
@@ -1089,12 +1155,9 @@ def replace_icons_in_svg(
                             replaced = True
                             break
 
-        # Method 3: Deterministic coordinate fallback (append cleanly before </svg>)
         if not replaced:
-            rx = info["x1"] * scale_x
-            ry = info["y1"] * scale_y
-            rw = info["width"] * scale_x
-            rh = info["height"] * scale_y
+            rx, ry = info["x1"] * scale_x, info["y1"] * scale_y
+            rw, rh = info["width"] * scale_x, info["height"] * scale_y
             svg_content = svg_content.replace("</svg>", f"  {_make_image_tag(rx, ry, rw, rh)}\n</svg>", 1)
 
         replaced_count += 1
@@ -1116,17 +1179,11 @@ def replace_icons_in_svg(
 
 
 # ============================================================================
-# Step 5.5: Post-Swap Visual Polish Pass (Catches Ghost Lines / Double Text!)
+# Step 5.5: Post-Swap Visual Polish Pass on REAL Composited Render
 # ============================================================================
 
 
-def _sanitize_svg_numeric_typos(svg_code: str) -> str:
-    """Fix occasional LLM double-decimal typos like width="95..0" that silently zero out clipPaths in resvg-py."""
-    return re.sub(r'(\b(?:x|y|x1|y1|x2|y2|cx|cy|r|rx|ry|width|height|font-size|stroke-width)=["\']-?\d+)\.\.+(\d+)', r"\1.\2", svg_code)
-
-
 def _dehydrate_base64_images(svg_code: str) -> tuple[str, dict[str, str]]:
-    """Temporarily replace `data:image/png;base64,...` strings with compact `__B64_IMG_001__` tokens."""
     mapping: dict[str, str] = {}
     counter = [0]
 
@@ -1136,12 +1193,10 @@ def _dehydrate_base64_images(svg_code: str) -> tuple[str, dict[str, str]]:
         mapping[token] = m.group(0)
         return token
 
-    compact = re.sub(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+", _repl, svg_code)
-    return compact, mapping
+    return re.sub(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+", _repl, svg_code), mapping
 
 
 def _rehydrate_base64_images(compact_svg: str, mapping: dict[str, str]) -> tuple[str, list[str]]:
-    """Restore all `__B64_IMG_...__` tokens and report any accidentally dropped tokens."""
     missing = [tok for tok in mapping if tok not in compact_svg]
     out = compact_svg
     for tok, uri in mapping.items():
@@ -1156,56 +1211,39 @@ def polish_final_svg_after_icon_swap(
     viewbox: tuple[int, int],
     output_dir: Path,
     *,
-    inventory: Optional[list[str]] = None,
-    resolved_density: str = "concise",
+    resolved_density: str = "detailed",
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Run 1 surgical post-swap visual inspection on the REAL hydrated `final_pre_polish.png`.
-
-    Because `optimize_autofigure_template` only sees grey `<AF>` boxes, this post-swap pass inspects
-    the ACTUAL transparent icons composited onto the SVG and eliminates:
-      1. Duplicate vector ghost lines / 3D edges peeking out behind transparent `<image>` assets
-      2. Double/overlapping text between vector `<text>` and nearby icons
-      3. Minor arrow collisions or sub-floor font sizes reported by `lint_svg`
-    """
+    """Run 1 surgical post-swap visual inspection on the REAL composited `final_pre_polish.png`."""
     w, h = viewbox
     pre_png = output_dir / "final_pre_polish.png"
     renderer = render_svg_to_png(hydrated_svg, pre_png, width=min(w, 3840))
-    lint_before = lint_svg(
-        hydrated_svg,
-        exact_text_inventory=inventory or None,
-        expected_viewbox=viewbox,
-        rendered_png_path=pre_png,
-        density=resolved_density,
-    )
+    lint_before = lint_svg(hydrated_svg, expected_viewbox=viewbox, rendered_png_path=pre_png, density=resolved_density)
+    geo_errs = [
+        e for e in lint_before.errors if any(k in e for k in ("Canvas clipping", "Text collision", "overflows its box", "XML"))
+    ]
+    issues_txt = "\n".join(f"- {e}" for e in geo_errs[:12]) if geo_errs else "- None."
 
     compact_svg, b64_map = _dehydrate_base64_images(hydrated_svg)
     if on_progress:
-        on_progress(
-            f"AutoFigure Step 5.5 (Post-Swap Polish): Auditing final composited render ({len(b64_map)} icons, "
-            f"{len(lint_before.errors)} lint errors)..."
-        )
+        on_progress(f"Step 5.5 (Post-Swap Polish): Auditing composited render ({len(b64_map)} icons, {len(geo_errs)} geo lint issues)...")
 
-    polish_prompt = f"""You are a Principal Scientific SVG Finisher performing a **Final Post-Swap Visual Audit** on our composited editable SVG (`viewBox="0 0 {w} {h}"`).
+    polish_prompt = f"""You are a Principal Scientific SVG Finisher performing 1 surgical post-swap visual audit (`viewBox="0 0 {w} {h}"`).
+Compare **Image 2 (`final_pre_polish.png`)** against **Image 1 (`figure.png`, target)** and fix ONLY real visual discrepancies:
+1. Delete any ghost vector artwork peeking out behind `<image href="__B64_IMG_...__"/>` or double/overlapping text.
+2. Fix any misaligned arrow endpoints, missing small icons/arrows, or text touching a nearby icon/border.
+3. Keep ALL {len(b64_map)} `href="__B64_IMG_...__"` tokens intact!
+4. NEVER write collapsed wedge arrow paths `M...h...l...v...z`.
 
-Compare **Image 2 (`final_pre_polish.png`, our real composited SVG with all transparent icons embedded)** side-by-side against **Image 1 (`figure.png`, original target)**.
+DETECTED GEOMETRIC ISSUES:
+{issues_txt}
 
-FIX EVERY REAL VISUAL DEFECT YOU SEE IN IMAGE 2:
-1. **DELETE GHOST / DUPLICATE VECTOR ARTWORK BEHIND TRANSPARENT ICONS**: Inspect around EVERY embedded `<image href="__B64_IMG_...__"/>`! Are there ANY stray black zig-zag lines, duplicate 3D block outlines, cut seams, or extra shapes peeking out behind/around a transparent icon? **DELETE those stray vector elements immediately!**
-2. **FIX DOUBLE / OVERLAPPING / TOUCHING TEXT (NEVER DELETE INVENTORY LABELS!)**: Inspect EVERY text label in Image 2! Check BOTH: (a) does any text touch/graze an `<image>` edge or get partially cut off, AND (b) do any two neighboring horizontal labels touch or crowd each other (e.g. `IdentityGeometry`)? NEVER delete a required `[EXACT TEXT INVENTORY]` vector `<text>`! Center every label cleanly in open white space with >= 14px clearance from neighboring words and icons, and convert any literal `_` subscripts into `<tspan font-size="72%" dy="5">...</tspan>`!
-3. **FIX EVERY STRAY, FLOATING, OR DUPLICATE ARROW**: Check EVERY gap between modules in Image 2! Between any two adjacent modules there must be AT MOST ONE clean centered arrow (delete any stray tiny second arrow stub, delete any arrow pointing into empty space or floating title text, merge duplicate parallel dashed arrows into ONE crisp arrow, and align arrow endpoints cleanly with zero crossings over text or faces!).
-4. **FIX EVERY PROGRAMMATIC LINTER ERROR BELOW** (e.g., bump sub-floor `font-size` up to the required minimum px so 2-column print stays crisp!).
-5. **PROTECT EVERY SINGLE EMBEDDED ICON**: Keep ALL `{len(b64_map)}` `href="__B64_IMG_...__"` `<image>` elements intact! Do NOT delete or alter any `__B64_IMG_...__` token!
-
-=== PROGRAMMATIC LINTER REPORT ===
-{lint_before.to_prompt_feedback()}
-
-=== CURRENT SVG SOURCE (WITH COMPACT ICON TOKENS) ===
+CURRENT SVG:
 ```xml
 {compact_svg}
 ```
 
-Output ONLY the complete polished valid SVG code starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
+Output ONLY valid SVG starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
 
     base_eff = getattr(getattr(client, "settings", None), "reasoning_effort", "medium")
     pol_eff = resolve_stage_effort(base_eff, "medium")
@@ -1213,9 +1251,9 @@ Output ONLY the complete polished valid SVG code starting with `<svg` and ending
         raw = client.generate_multimodal(
             [
                 polish_prompt,
-                f"Image 1 — Original Target Figure (`figure.png`, {w}x{h}):",
+                f"Image 1 — Target (`figure.png`, {w}x{h}):",
                 figure_path,
-                f"Image 2 — Current Composited Final SVG (`final_pre_polish.png`):",
+                "Image 2 — Current Composited SVG (`final_pre_polish.png`):",
                 pre_png,
             ],
             max_output_tokens=48000,
@@ -1223,53 +1261,28 @@ Output ONLY the complete polished valid SVG code starting with `<svg` and ending
             reasoning_effort=pol_eff,
         )
     except Exception as exc:
-        return hydrated_svg, {
-            "round": "post_swap_polish",
-            "renderer": renderer,
-            "accepted": False,
-            "reject_reason": f"Post-swap polish skipped on API error: {exc}",
-        }
+        return hydrated_svg, {"round": "post_swap_polish", "renderer": renderer, "accepted": False, "reject_reason": str(exc)}
 
-    candidate_compact = _sanitize_svg_numeric_typos(normalize_svg_root(extract_svg_block(raw), w, h))
-    if not candidate_compact:
-        return hydrated_svg, {
-            "round": "post_swap_polish",
-            "renderer": renderer,
-            "accepted": False,
-            "reject_reason": "No <svg> block extracted in post-swap polish.",
-        }
+    candidate = sanitize_svg_numeric_typos(normalize_svg_root(extract_svg_block(raw), w, h))
+    if not candidate:
+        return hydrated_svg, {"round": "post_swap_polish", "renderer": renderer, "accepted": False, "reject_reason": "Empty SVG."}
 
-    ok, errs = validate_svg_xml(candidate_compact)
+    ok, errs = validate_svg_xml(candidate)
     if not ok:
-        candidate_compact = fix_svg_xml_with_llm(client, candidate_compact, errs, width=w, height=h)
-        ok, errs = validate_svg_xml(candidate_compact)
+        candidate = fix_svg_xml_with_llm(client, candidate, errs, width=w, height=h)
+        ok, errs = validate_svg_xml(candidate)
     if not ok:
-        return hydrated_svg, {
-            "round": "post_swap_polish",
-            "renderer": renderer,
-            "accepted": False,
-            "reject_reason": f"Post-swap polish produced invalid XML: {errs[:2]}",
-        }
+        return hydrated_svg, {"round": "post_swap_polish", "renderer": renderer, "accepted": False, "reject_reason": f"Invalid XML: {errs[:2]}"}
 
-    rehydrated, missing_tokens = _rehydrate_base64_images(candidate_compact, b64_map)
-    if missing_tokens:
-        return hydrated_svg, {
-            "round": "post_swap_polish",
-            "renderer": renderer,
-            "accepted": False,
-            "reject_reason": f"Post-swap polish dropped {len(missing_tokens)} icon token(s); keeping pre-polish SVG.",
-        }
+    rehydrated, missing = _rehydrate_base64_images(candidate, b64_map)
+    if missing:
+        return hydrated_svg, {"round": "post_swap_polish", "renderer": renderer, "accepted": False, "reject_reason": f"Dropped {len(missing)} icon(s)."}
 
-    return rehydrated, {
-        "round": "post_swap_polish",
-        "renderer": renderer,
-        "accepted": True,
-        "reject_reason": "",
-    }
+    return rehydrated, {"round": "post_swap_polish", "renderer": renderer, "accepted": True, "reject_reason": ""}
 
 
 # ============================================================================
-# Unified AutoFigure-Edit Engine Entry Point (Stage 5 + 6 Replacement)
+# Unified AutoFigure-Edit Engine Entry Point (Steps 2 -> 5.5)
 # ============================================================================
 
 
@@ -1278,15 +1291,16 @@ def run_autofigure_svg_engine(
     figure_path: Path,
     output_dir: Path,
     *,
-    schema_md: str = "",
     font_family: str = "Inter, Helvetica, Arial, sans-serif",
     svg_mode: str = "hybrid_rich",
     density: str = "auto",
     seg_backend: str = "auto",
     matting_backend: str = "auto",
-    sam_prompts: str = "icon,portrait,diagram,chart,object",
+    gpu_python: str = "",
+    hf_endpoint: str = "",
+    sam_prompts: str = "icon,person,robot,animal,diagram,chart",
     sam_min_score: float = 0.45,
-    sam_merge_threshold: float = 0.85,
+    sam_merge_threshold: float = 0.80,
     sam_api_key: str = "",
     sam_max_masks: int = 32,
     rmbg_model_path: str = "",
@@ -1294,34 +1308,24 @@ def run_autofigure_svg_engine(
     optimize_iterations: int = 2,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> dict[str, Any]:
-    """Run the full native AutoFigure-Edit figure -> editable SVG engine.
-
-    Steps:
-      1. Optional 4K proportional upscale (auto-enabled when SAM3 is active or `--upscale-4k` is set)
-      2. Icon detection -> `samed.png` + `boxlib.json` (SAM3 local/fal/roboflow or Zero-GPU VLM fallback)
-      3. Crop + transparent matting -> `icons/icon_AF.._nobg.png` (RMBG-2.0 / BiRefNet / FloodFill)
-      4. Clean `<AF>01` Template SVG generation -> `template.svg`
-      5. Multi-round visual template optimization using Windows zero-DLL `resvg-py` -> `optimized_template.svg`
-      6. Deterministic coordinate-aligned `<AF>01` -> base64 `<image>` replacement -> `final.svg` + 2× PNG + 2-col preview
-    """
+    """Run the full v3.0 figure -> editable SVG engine with deterministic post-processing."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    inventory = extract_exact_text_inventory(schema_md) if schema_md else []
-    resolved_density = resolve_density_mode(density, len(inventory))
+    resolved_density = resolve_density_mode(density, 40)
 
-    resolved_seg = resolve_seg_backend(seg_backend, sam_api_key)
+    resolved_seg = resolve_seg_backend(seg_backend, sam_api_key, gpu_python=gpu_python)
     should_upscale = enable_upscale_4k or resolved_seg in ("sam3_local", "sam3_fal", "sam3_roboflow")
 
     work_figure_path = output_dir / "figure.png"
     with Image.open(figure_path) as src_im:
         img = src_im.convert("RGB")
     if should_upscale:
-        img, did_upscale = upscale_image_to_4k_if_needed(img)
-        if did_upscale and on_progress:
-            on_progress(f"AutoFigure Step 1: Upscaled anchor proportionally to 4K ({img.width}x{img.height}).")
+        img, did_up = upscale_image_to_4k_if_needed(img)
+        if did_up and on_progress:
+            on_progress(f"Step 1: Upscaled figure proportionally to 4K ({img.width}x{img.height}).")
     img.save(work_figure_path, format="PNG")
     viewbox = (img.width, img.height)
 
-    # Step 2 + 3: Segmentation & Matting (skipped in pure_vector mode)
+    # Step 2 + 3: Icon Segmentation & Photo-Protected Matting
     boxes: list[dict[str, Any]] = []
     icon_infos: list[dict[str, Any]] = []
     used_seg = "disabled_pure_vector"
@@ -1329,7 +1333,6 @@ def run_autofigure_svg_engine(
     samed_path = output_dir / "samed.png"
 
     if svg_mode == "hybrid_rich":
-        max_cap = 26 if resolved_density == "detailed" else 18
         samed_path, _boxlib_path, boxes, used_seg = segment_icons_autofigure(
             client,
             work_figure_path,
@@ -1340,7 +1343,8 @@ def run_autofigure_svg_engine(
             merge_threshold=sam_merge_threshold,
             sam_api_key=sam_api_key,
             sam_max_masks=sam_max_masks,
-            max_assets_cap=max_cap,
+            gpu_python=gpu_python,
+            hf_endpoint=hf_endpoint,
             on_progress=on_progress,
         )
         icon_infos, used_matting = crop_and_matte_icons(
@@ -1349,16 +1353,16 @@ def run_autofigure_svg_engine(
             output_dir,
             matting_backend=matting_backend,
             rmbg_model_path=rmbg_model_path,
+            gpu_python=gpu_python,
+            hf_endpoint=hf_endpoint,
             on_progress=on_progress,
         )
     else:
-        shutil.copyfile(work_figure_path, samed_path)
+        img.save(samed_path, format="PNG")
 
-    # Step 4: Clean <AF>01 Template SVG Reconstruction
+    # Step 4: Clean `<AF>` Template SVG
     if on_progress:
-        on_progress(
-            f"AutoFigure Step 4: Reconstructing clean <AF> template SVG ({viewbox[0]}x{viewbox[1]}, {len(boxes)} icons)..."
-        )
+        on_progress(f"Step 4: Generating editable <AF> template SVG ({viewbox[0]}x{viewbox[1]}, {len(boxes)} icons)...")
     template_path = output_dir / "template.svg"
     template_svg = generate_autofigure_svg_template(
         client,
@@ -1367,14 +1371,9 @@ def run_autofigure_svg_engine(
         boxes,
         template_path,
         font_family=font_family,
-        exact_text_inventory=inventory or None,
-        resolved_density=resolved_density,
     )
-    (output_dir / "raw.svg").write_text(template_svg, encoding="utf-8")
 
-    # Step 4.6 & Step 5.5 Optimization Budget:
-    # - optimize_iterations == 1 (fast default): skip blind grey-box round; spend the 1 round on Step 5.5 Post-Swap Visual Polish!
-    # - optimize_iterations >= 2: run (optimize_iterations - 1) grey-box alignment round(s) + 1 Step 5.5 Post-Swap Visual Polish!
+    # Step 4.6 + Step 5.5 Budget (default optimize_iterations=2 -> 1 template round + 1 post-swap polish!)
     opt_iters = max(0, int(optimize_iterations))
     if len(icon_infos) > 0:
         template_rounds = max(0, opt_iters - 1)
@@ -1394,16 +1393,17 @@ def run_autofigure_svg_engine(
         on_progress=on_progress,
     )
 
-    # Step 5: Deterministic Coordinate-Aligned Icon Replacement
+    # Step 5: Deterministic Icon Replacement + Deterministic Geometry Post-Processor (0.05s)
     if on_progress:
-        on_progress(f"AutoFigure Step 5: Deterministically embedding {len(icon_infos)} transparent icon(s) into final.svg...")
+        on_progress(f"Step 5: Embedding {len(icon_infos)} icon(s) + running deterministic arrow/text repair...")
     final_svg, replaced_count = replace_icons_in_svg(optimized_svg, icon_infos, viewbox)
-
     ok_xml, xml_errs = validate_svg_xml(final_svg)
     if not ok_xml:
         final_svg = fix_svg_xml_with_llm(client, final_svg, xml_errs, width=viewbox[0], height=viewbox[1])
+    final_svg, pre_post_stats = postprocess_svg_deterministic(final_svg)
+    (output_dir / "final_pre_polish.svg").write_text(final_svg, encoding="utf-8")
 
-    # Step 5.5: Post-Swap Visual Polish Pass on the REAL composited figure (catches ghost lines/double text!)
+    # Step 5.5: Post-Swap Visual Polish + Final Deterministic Pass
     if do_post_swap_polish:
         final_svg, polish_log = polish_final_svg_after_icon_swap(
             client,
@@ -1411,13 +1411,12 @@ def run_autofigure_svg_engine(
             final_svg,
             viewbox,
             output_dir,
-            inventory=inventory or None,
             resolved_density=resolved_density,
             on_progress=on_progress,
         )
         round_logs.append(polish_log)
 
-    final_svg = _sanitize_svg_numeric_typos(final_svg)
+    final_svg, final_post_stats = postprocess_svg_deterministic(final_svg)
     final_svg_path = output_dir / "final.svg"
     final_svg_path.write_text(final_svg, encoding="utf-8")
 
@@ -1427,12 +1426,11 @@ def run_autofigure_svg_engine(
 
     final_lint: LintReport = lint_svg(
         final_svg,
-        exact_text_inventory=inventory or None,
         expected_viewbox=viewbox,
         rendered_png_path=final_png_path,
         density=resolved_density,
     )
-    qa_md = _build_autofigure_qa_report(
+    qa_md = _build_qa_report(
         final_lint=final_lint,
         round_logs=round_logs,
         renderer=renderer_used,
@@ -1440,6 +1438,8 @@ def run_autofigure_svg_engine(
         seg_backend=used_seg,
         matting_backend=used_matting,
         embedded_count=replaced_count,
+        pre_post_stats=pre_post_stats,
+        final_post_stats=final_post_stats,
     )
     qa_path = output_dir / "qa.md"
     qa_path.write_text(qa_md, encoding="utf-8")
@@ -1455,11 +1455,12 @@ def run_autofigure_svg_engine(
         "embedded_assets_count": replaced_count,
         "seg_backend": used_seg,
         "matting_backend": used_matting,
+        "postprocess_stats": {"pre_polish": pre_post_stats, "final": final_post_stats},
         "round_logs": round_logs,
     }
 
 
-def _build_autofigure_qa_report(
+def _build_qa_report(
     *,
     final_lint: LintReport,
     round_logs: list[dict[str, Any]],
@@ -1468,34 +1469,36 @@ def _build_autofigure_qa_report(
     seg_backend: str,
     matting_backend: str,
     embedded_count: int,
+    pre_post_stats: dict[str, int],
+    final_post_stats: dict[str, int],
 ) -> str:
     w, h = viewbox
     lines = [
-        "# Paper2SVG-ultra v2.1 Quality Audit Report (`qa.md`)",
+        "# Paper2SVG-ultra v3.0 Quality Audit Report (`qa.md`)",
         "",
-        f"- **SVG Engine**: `AutoFigure-Edit Native (<AF> Template -> Optimize -> Deterministic Swap)`",
+        "- **Pipeline**: `Pure AutoFigure-Edit (Method Section + 1 Style Ref -> Step 1 -> Seg/Matting -> <AF> SVG -> Deterministic Repair -> Polish)`",
         f"- **Segmentation Backend**: `{seg_backend}`",
         f"- **Matting Backend**: `{matting_backend}`",
-        f"- **SVG Renderer**: `{renderer}` (zero-DLL Windows native)",
+        f"- **SVG Renderer**: `{renderer}` (Windows zero-DLL native)",
         f"- **Final ViewBox**: `{w} x {h}` (aspect ratio `{w / max(1, h):.2f}:1`)",
-        f"- **Embedded Visual Assets**: `{embedded_count}`",
+        f"- **Embedded Visual Icons**: `{embedded_count}`",
+        f"- **Deterministic Post-Processor**: pre-polish=`{pre_post_stats}` | final=`{final_post_stats}`",
         f"- **XML Valid**: `{final_lint.valid_xml}`",
         f"- **Hard Linter Errors**: `{len(final_lint.errors)}` | **Warnings**: `{len(final_lint.warnings)}`",
-        f"- **Stats**: `{json.dumps(final_lint.stats, ensure_ascii=False)}`",
         "",
-        "## Template Visual Optimization Rounds",
+        "## Visual Optimization Rounds",
     ]
     if not round_logs:
         lines.append("- Optimization skipped (`optimize_iterations=0`).")
     for entry in round_logs:
         lines.append(
-            f"- **Round {entry['round']}**: Accepted=`{entry['accepted']}` | Renderer=`{entry.get('renderer', renderer)}`"
+            f"- **Round `{entry['round']}`**: Accepted=`{entry['accepted']}` | Renderer=`{entry.get('renderer', renderer)}`"
             + (f" | Note: {entry['reject_reason']}" if entry.get("reject_reason") else "")
         )
     if final_lint.errors:
         lines.append("\n## Linter Errors")
-        lines.extend(f"- ❌ {e}" for e in final_lint.errors)
+        lines.extend(f"- {e}" for e in final_lint.errors)
     if final_lint.warnings:
         lines.append("\n## Linter Warnings")
-        lines.extend(f"- ⚠️ {wn}" for wn in final_lint.warnings)
+        lines.extend(f"- {wn}" for wn in final_lint.warnings)
     return "\n".join(lines) + "\n"

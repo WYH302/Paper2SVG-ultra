@@ -319,13 +319,19 @@ class ResponsesAPIClient:
         prompt: str,
         *,
         reference_images: Optional[list[ImageInput]] = None,
+        subject_images: Optional[list[ImageInput]] = None,
         edit_target_image: Optional[ImageInput] = None,
         model: Optional[str] = None,
         image_tool_model: Optional[str] = None,
         quality: Optional[str] = None,
         size: Optional[str] = None,
     ) -> tuple[Image.Image, dict[str, Any]]:
-        """Generate or surgically edit a Stage-1 visual anchor via Responses built-in image_generation tool."""
+        """Generate a Step-1 academic figure via Responses built-in `image_generation` tool.
+
+        Cleanly separates:
+          - `reference_images`: Style-only visual taste anchor (NEVER copy faces/photos/text/legends!)
+          - `subject_images`: Author's OWN paper input/output images (USE directly as visual subjects!)
+        """
         content_blocks: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
 
         if edit_target_image is not None:
@@ -346,13 +352,26 @@ class ResponsesAPIClient:
                     {
                         "type": "input_text",
                         "text": (
-                            f"[STYLE-ONLY ART-DIRECTION REFERENCE #{idx} — MATCH ONLY ITS VISUAL TASTE, "
-                            "CLEAN WHITESPACE, COLOR HARMONY, LINE WEIGHT, AND SCIENTIFIC ILLUSTRATION POLISH; "
-                            "STRICTLY FORBIDDEN TO COPY ANY FACE, PERSON, HAIR COLOR, PHOTO SUBJECT, TEXT, OR MODULES FROM IT!]"
+                            f"[STYLE-ONLY REFERENCE FIGURE #{idx} — IMITATE ONLY ITS VISUAL ARTISTIC STYLE "
+                            "(tone, palette, line weight, shading, icon feel, arrow aesthetics, typography); "
+                            "STRICTLY FORBIDDEN TO COPY ANY FACE, PERSON, PHOTOGRAPH, LEGEND, RADAR CHART, OR TEXT FROM IT!]"
                         ),
                     }
                 )
                 content_blocks.append({"type": "input_image", "image_url": encode_image_to_data_url(ref_img)})
+
+        if subject_images:
+            for idx, subj_img in enumerate(subject_images, 1):
+                content_blocks.append(
+                    {
+                        "type": "input_text",
+                        "text": (
+                            f"[OWN PAPER SUBJECT IMAGE #{idx} — THIS IS AN ACTUAL INPUT/OUTPUT VISUAL FROM THE AUTHOR'S OWN PAPER. "
+                            "USE THIS REAL SUBJECT DIRECTLY INSIDE THE DIAGRAM INSTEAD OF INVENTING OR COPYING ANY SUBJECT FROM THE STYLE REFERENCE!]"
+                        ),
+                    }
+                )
+                content_blocks.append({"type": "input_image", "image_url": encode_image_to_data_url(subj_img)})
 
         tool_def: dict[str, Any] = {
             "type": "image_generation",
