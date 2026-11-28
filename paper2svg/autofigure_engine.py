@@ -859,7 +859,8 @@ CRITICAL ENGINEERING RULES:
    - Thick block arrows: use a proper **7-point symmetric closed `<polygon>`**. NEVER write `M...h...l...v...z` in one short `<path>`!
 3. **FIT ALL TEXT INSIDE ITS BOX**: Match Image 1's font-family (serif vs sans, default `{font_family}`), weights, and compact font-sizes so EVERY label fits cleanly inside its enclosing `<rect>` with >= 6px horizontal margin.
 4. **CLEAN SUBSCRIPTS**: Reset baseline after every `<tspan dy="4">` via `<tspan dy="-4">`.
-5. Do NOT add any gray `<AF>01` placeholder boxes.
+5. **NO TOP TITLE OR BOTTOM BOASTING BANNERS**: NEVER add a top paper-title / "Figure 1: ..." header bar or a bottom marketing/claims/results slogan strip. If Image 1 has a standalone top title banner or bottom slogan/boasting bar unconnected to the architecture arrows, OMIT it cleanly (keep only architectural panels and compact symbol/color legends).
+6. Do NOT add any gray `<AF>01` placeholder boxes.
 
 Output ONLY valid SVG starting with `<svg` and ending with `</svg>`. NO markdown fences, NO commentary."""
     else:
@@ -884,6 +885,7 @@ CRITICAL ENGINEERING RULES:
    - Thick block arrows: ALWAYS draw a proper **7-point symmetric closed `<polygon>`** (top shaft -> head base -> wing -> tip -> opposite wing -> head base -> bottom shaft). **NEVER combine a shaft + head + `z` in one short `<path d="M...h...l...v...z"/>`!**
 4. **FIT ALL TEXT INSIDE ITS BOX**: Match Image 1's font-family (serif vs sans, fallback `{font_family}`), weights, and compact font-sizes so EVERY label fits cleanly INSIDE its enclosing `<rect>` with >= 6px horizontal margin and ZERO overlap against any `<g id="AF..">` placeholder!
 5. **CLEAN SUBSCRIPTS**: Reset baseline after every `<tspan dy="4">` via `<tspan dy="-4">`. Escape XML entities strictly (`&amp;`, `&lt;`, `&gt;`).
+6. **NO TOP TITLE OR BOTTOM BOASTING BANNERS**: NEVER add a top paper-title / "Figure 1: ..." header bar or a bottom marketing/claims/results slogan strip. If Image 1 has a standalone top title banner or bottom slogan/boasting bar unconnected to the architecture arrows, OMIT it cleanly (keep only architectural panels and compact symbol/color legends).
 
 EXACT PLACEHOLDER COORDINATES ({len(boxes)} boxes):
 {coord_lines}
@@ -974,6 +976,7 @@ Compare Image 3 (current SVG rendered as PNG) against Image 1 (`figure.png`, tar
 Fix EVERY position/alignment/style mismatch across 8 checks:
 - POSITION: (1) Icon `<AF>` alignment, (2) Text placement with zero overlaps/clipping, (3) Arrow endpoints & exact direction (`UP`/`DOWN`/`LEFT`/`RIGHT`), (4) Borders & dividers.
 - STYLE: (5) Placeholder proportions, (6) Font family/sizes/weights matching Image 1, (7) Clean arrows (NEVER collapsed `M...h...l...v...z` wedges!), (8) Panel fills & stroke widths.
+- NEVER add or re-insert a top paper-title / "Figure 1: ..." banner or bottom boasting/metrics/slogan bar (keep only architectural panels and compact symbol/color legends).
 {placeholder_rule}
 
 CURRENT SVG:
@@ -1233,7 +1236,7 @@ Compare **Image 2 (`final_pre_polish.png`)** against **Image 1 (`figure.png`, ta
 1. Delete any ghost vector artwork peeking out behind `<image href="__B64_IMG_...__"/>` or double/overlapping text.
 2. Fix any misaligned arrow endpoints, missing small icons/arrows, or text touching a nearby icon/border.
 3. Keep ALL {len(b64_map)} `href="__B64_IMG_...__"` tokens intact!
-4. NEVER write collapsed wedge arrow paths `M...h...l...v...z`.
+4. NEVER write collapsed wedge arrow paths `M...h...l...v...z`, and NEVER add or re-insert a top paper-title banner or bottom boasting/metrics/slogan strip.
 
 DETECTED GEOMETRIC ISSUES:
 {issues_txt}

@@ -117,6 +117,9 @@ def test_strict_method_section_slicer_arabic_and_ieee_roman() -> None:
         assert "lambda_adapt" in info["method_text"]
         assert "PSNR=31.42" not in info["method_text"]
         assert "Vaswani et al." not in info["method_text"]
+        # Full paper title & abstract are omitted when Method section exists (prevents useless top title banners!)
+        assert "PhysFlow-SPI: Physics-Consistent Flow Matching" not in info["method_text"]
+        assert "single-pixel face reconstruction" not in info["method_text"]
         assert any("EXPERIMENTS" in h for h in info["dropped_headings"])
 
         # 2. Arabic numbering (`3. Method` -> stops cleanly before `4. Evaluation`)
@@ -152,11 +155,15 @@ def test_strict_method_section_slicer_arabic_and_ieee_roman() -> None:
 def test_step1_prompt_builder_and_trimmer() -> None:
     p_ref = build_autofigure_step1_prompt("Our encoder maps X to Z.", has_style_ref=True, has_subject_images=True)
     assert "closely imitate the visual (artistic) style" in p_ref
-    assert "ORIGINALITY GUARD" in p_ref
+    assert "ORIGINALITY & ACADEMIC LAYOUT GUARD" in p_ref
+    assert "NO TOP TITLE BANNER" in p_ref
+    assert "NO BOTTOM BOASTING" in p_ref
     assert "OWN PAPER SUBJECT IMAGE" in p_ref
 
     p_zero = build_autofigure_step1_prompt("Our encoder maps X to Z.", has_style_ref=False)
     assert "professional academic journal style figure" in p_zero
+    assert "NO TOP TITLE BANNER" in p_zero
+    assert "NO BOTTOM BOASTING" in p_zero
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)

@@ -97,9 +97,11 @@ Only the visual style should be consistent.
 
 The goal is that the figure looks like it was drawn by the same illustrator using the same visual design language as the reference figure.
 
-ORIGINALITY GUARD:
+ORIGINALITY & ACADEMIC LAYOUT GUARD:
 - NEVER copy any face, person, photograph, legend, radar chart, symbol, or text label from the style reference image.
-- Draw ONLY real modules, data flows, formulas, and visual artifacts described in the paper's method section below.{subject_note}{lang_note}
+- Draw ONLY real modules, data flows, formulas, and visual artifacts described in the paper's method section below.
+- NO TOP TITLE BANNER: Do NOT put any full-width paper title, figure title, or "Figure 1: ..." header at the top of the image (the LaTeX caption goes outside the figure). Start directly with the method panels.
+- NO BOTTOM BOASTING / METRICS / SLOGAN STRIP: Do NOT add a bottom bar advertising benchmark scores, speed/accuracy claims, dataset counts, or marketing slogans. Use the bottom area ONLY for a compact visual legend explaining symbols/arrows/colors used in the diagram (or leave clean whitespace).{subject_note}{lang_note}
 
 Below is the method section of the paper:
 \"\"\"
@@ -110,7 +112,10 @@ Below is the method section of the paper:
 
 {method_text}
 
-Draw ONLY real modules, data flows, formulas, and visual artifacts described in the method section above, with crisp readable typography and generous clean whitespace.{subject_note}{lang_note}"""
+STRICT ACADEMIC LAYOUT RULES:
+- Draw ONLY real modules, data flows, formulas, and visual artifacts described in the method section above, with crisp readable typography and generous clean whitespace.
+- NO TOP TITLE BANNER: Do NOT draw a paper title or "Figure 1: ..." heading across the top of the image (LaTeX adds the caption externally).
+- NO BOTTOM BOASTING / METRICS / SLOGAN STRIP: Do NOT put benchmark scores, accuracy/speed bragging, or marketing slogans along the bottom. If a bottom bar is used at all, include ONLY a compact legend explaining arrows, icons, or color symbols in the figure (otherwise leave clean whitespace).{subject_note}{lang_note}"""
 
 
 def generate_step1_figure(

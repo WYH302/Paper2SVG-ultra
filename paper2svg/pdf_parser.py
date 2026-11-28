@@ -176,34 +176,27 @@ def extract_method_section(pdf_path: Path, max_chars: int = 28000) -> dict[str, 
             method_indices.append(idx)
 
     selected: list[dict[str, Any]] = []
-    # Always include compact Title + Abstract context (capped at 2200 chars) so paper name/acronyms are exact
-    if sections:
-        preamble = sections[0]
-        selected.append({**preamble, "text": preamble["text"][:2200]})
-    for idx, sec in enumerate(sections[1:], 1):
-        if re.match(r"^(?:Abstract|ABSTRACT|摘要)\b", sec["heading"]):
-            selected.append({**sec, "text": sec["text"][:2000]})
-            break
-
     if method_indices:
+        # Strictly feed ONLY the Method section(s): omit full paper Title & boastful Abstract so Step 1
+        # never slaps a useless paper-title banner on top or marketing/metric claims along the bottom!
         for idx in method_indices:
             selected.append(sections[idx])
-        # Mark any un-selected non-method sections (like Introduction) as dropped for audit clarity
-        sel_ids = {id(s) for s in selected} | {id(sections[i]) for i in method_indices}
+        sel_ids = {id(sections[i]) for i in method_indices}
         for idx, sec in enumerate(sections):
-            if idx > 0 and id(sec) not in sel_ids and sec["heading"] not in dropped_headings:
-                if not re.match(r"^(?:Abstract|ABSTRACT|摘要)\b", sec["heading"]):
-                    dropped_headings.append(sec["heading"])
+            if id(sec) not in sel_ids and sec["heading"] not in dropped_headings:
+                dropped_headings.append(sec["heading"])
     else:
-        # Short technical spec or non-standard heading layout: keep all non-dropped sections before Experiments/References
-        for sec in sections[1:]:
+        # Short technical spec or non-standard heading layout: keep non-dropped body sections before Experiments/References
+        for idx, sec in enumerate(sections):
             h = sec["heading"]
-            if STOP_AFTER_METHOD_RE.match(h) or DROP_ALWAYS_RE.match(h):
+            if idx == 0 and len(sections) > 1:
+                dropped_headings.append(h)
+                continue
+            if STOP_AFTER_METHOD_RE.match(h) or DROP_ALWAYS_RE.match(h) or re.match(r"^(?:Abstract|ABSTRACT|摘要)\b", h):
                 if h not in dropped_headings:
                     dropped_headings.append(h)
                 continue
-            if not re.match(r"^(?:Abstract|ABSTRACT|摘要)\b", h):
-                selected.append(sec)
+            selected.append(sec)
 
     # Assemble within character budget (Method sections strictly prioritized)
     chunks: list[str] = []
