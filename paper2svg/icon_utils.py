@@ -19,25 +19,75 @@ from PIL import Image, ImageFilter
 
 
 def looks_like_opaque_photo_tile(crop_img: Image.Image) -> bool:
-    """Detect whether a cropped tile is a rectangular photograph/heatmap (keep opaque + optional rx=4)
-    vs an icon/diagram on a uniform white or soft pastel card backdrop.
+    """Detect whether a cropped tile is a rectangular photograph, blurred face, satellite patch,
+    noise texture, heatmap, or checkerboard/matrix mask (MUST stay opaque — NEVER let BiRefNet/RMBG
+    chew away studio portrait backdrops or punch holes through DMD checkerboards!).
     """
     rgb = np.asarray(crop_img.convert("RGB"), dtype=np.float32)
     h, w, _ = rgb.shape
     if h < 16 or w < 16:
         return False
-    border = np.concatenate([rgb[0, :, :], rgb[h - 1, :, :], rgb[:, 0, :], rgb[:, w - 1, :]], axis=0)
+
+    # Sample an INSET ring (skipping 2-4px of accidental outer canvas margin from CC/GD padding!)
+    ins = max(2, min(6, min(h, w) // 16))
+    inner = rgb[ins : max(ins + 4, h - ins), ins : max(ins + 4, w - ins)]
+    ih, iw, _ = inner.shape
+
+    # 1. Continuous-tone photographic richness check (catches studio portraits with light cream/beige backdrops,
+    #    blurred faces, satellite imagery, and spectrograms even if outer 2px border touched white canvas!)
+    lum_in = 0.299 * inner[:, :, 0] + 0.587 * inner[:, :, 1] + 0.114 * inner[:, :, 2]
+    sat_in = np.max(inner, axis=2) - np.min(inner, axis=2)
+    non_white = float(np.mean((lum_in < 238.0) | (sat_in > 16.0)))
+    q = (inner // 12.0).astype(np.int32)
+    unique_colors = int(len(np.unique(q[:, :, 0] * 1024 + q[:, :, 1] * 32 + q[:, :, 2])))
+    if non_white >= 0.72 and unique_colors >= 75:
+        return True
+
+    # 2. Dense binary/grayscale pattern check (e.g. DMD checkerboard mask, Gaussian/Poisson/Dropout noise tiles)
+    dark_ratio = float(np.mean(lum_in < 140.0))
+    gx = float(np.mean(np.abs(np.diff(lum_in, axis=1)) > 25.0))
+    gy = float(np.mean(np.abs(np.diff(lum_in, axis=0)) > 25.0))
+    if non_white >= 0.45 and dark_ratio >= 0.25 and (gx + gy) >= 0.22:
+        return True
+
+    # 3. Inset border uniformity & corner spread check (require real color/tonal variation so flat 1-color
+    #    vector icons with 2px white canvas padding are NEVER misclassified as opaque rectangular photos!)
+    if unique_colors < 8:
+        return False
+    border = np.concatenate([inner[0, :, :], inner[-1, :, :], inner[:, 0, :], inner[:, -1, :]], axis=0)
     med = np.median(border, axis=0)
     lum = float(0.299 * med[0] + 0.587 * med[1] + 0.114 * med[2])
     dists = np.linalg.norm(border - med, axis=1)
     uniform_ratio = float(np.mean(dists < 22.0))
-    if uniform_ratio >= 0.55 and lum >= 205.0:
+    if uniform_ratio >= 0.62 and lum >= 228.0:
         return False
-    if uniform_ratio < 0.45:
+    if uniform_ratio < 0.45 or lum < 195.0:
         return True
-    corners = np.array([rgb[2, 2], rgb[2, w - 3], rgb[h - 3, 2], rgb[h - 3, w - 3]])
-    corner_spread = float(np.max(np.linalg.norm(corners - med, axis=1)))
-    return corner_spread > 38.0
+    corners = np.array([inner[0, 0], inner[0, iw - 1], inner[ih - 1, 0], inner[ih - 1, iw - 1]])
+    return float(np.max(np.linalg.norm(corners - med, axis=1))) > 34.0
+
+
+def trim_outer_white_padding_for_photo(crop_img: Image.Image, max_trim: int = 6) -> tuple[Image.Image, tuple[int, int, int, int]]:
+    """Trim 1-6px of accidental pure-white canvas padding around an opaque rectangular photo tile."""
+    rgb = np.asarray(crop_img.convert("RGB"), dtype=np.float32)
+    h, w, _ = rgb.shape
+    if h < 24 or w < 24:
+        return crop_img, (0, 0, 0, 0)
+    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    sat = np.max(rgb, axis=2) - np.min(rgb, axis=2)
+    is_canvas = (lum > 246.0) & (sat < 10.0)
+    l = r = t = b = 0
+    while l < max_trim and float(np.mean(is_canvas[:, l])) > 0.85:
+        l += 1
+    while r < max_trim and float(np.mean(is_canvas[:, w - 1 - r])) > 0.85:
+        r += 1
+    while t < max_trim and float(np.mean(is_canvas[t, :])) > 0.85:
+        t += 1
+    while b < max_trim and float(np.mean(is_canvas[h - 1 - b, :])) > 0.85:
+        b += 1
+    if (l, t, r, b) == (0, 0, 0, 0):
+        return crop_img, (0, 0, 0, 0)
+    return crop_img.crop((l, t, w - r, h - b)), (l, t, r, b)
 
 
 def _find_1d_bands(counts: np.ndarray) -> list[tuple[int, int, int]]:
@@ -389,7 +439,7 @@ def detect_cc_frame_stripped(img: Image.Image) -> list[dict[str, Any]]:
     lum_s = lum[::2, ::2]
     dark_neutral = fg_s & (sat_s < 24.0) & (lum_s < 160.0)
     rich_fg = fg_s & (~dark_neutral)
-    rich_dil = np.asarray(Image.fromarray((rich_fg * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(5))) > 128
+    rich_dil = np.asarray(Image.fromarray((rich_fg * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(3))) > 128
     dn_u = dark_neutral.astype(np.uint8)
     vs = sum(np.roll(dn_u, d, axis=0) for d in range(-4, 5))
     hs = sum(np.roll(dn_u, d, axis=1) for d in range(-4, 5))
@@ -453,12 +503,22 @@ def strip_text_edges_on_box(arr: np.ndarray, box: dict[str, Any]) -> dict[str, A
     if x2 - x1 < 8 or y2 - y1 < 8:
         return {**box, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "bg_mode": "remove_bg", "rounded_rx": 0}
     patch = arr[y1:y2, x1:x2]
+    prompt_low = str(box.get("prompt", "")).lower()
+    crop_pil = Image.fromarray(np.clip(patch, 0, 255).astype(np.uint8), mode="RGB")
+    if any(k in prompt_low for k in ("person", "face", "photo", "heatmap", "checkerboard", "noise")) or looks_like_opaque_photo_tile(crop_pil):
+        _, (tl, tt, tr, tb) = trim_outer_white_padding_for_photo(crop_pil)
+        return {
+            **box,
+            "x1": x1 + tl,
+            "y1": y1 + tt,
+            "x2": max(x1 + tl + 8, x2 - tr),
+            "y2": max(y1 + tt + 8, y2 - tb),
+            "bg_mode": "opaque_rect",
+            "rounded_rx": 4,
+        }
+
     border = np.concatenate([patch[0, :, :], patch[-1, :, :], patch[:, 0, :], patch[:, -1, :]], axis=0)
     bg_col = np.median(border, axis=0)
-    b_lum = float(0.299 * bg_col[0] + 0.587 * bg_col[1] + 0.114 * bg_col[2])
-    b_uni = float(np.mean(np.linalg.norm(border - bg_col, axis=1) < 22.0))
-    if b_uni < 0.48 or b_lum < 195.0:
-        return {**box, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "bg_mode": "opaque_rect", "rounded_rx": 4}
 
     fg_local = np.linalg.norm(patch - bg_col, axis=2) > 22.0
     bh, bw = fg_local.shape

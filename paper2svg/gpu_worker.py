@@ -18,14 +18,18 @@ from PIL import Image
 
 # Curated specific visual object nouns for GroundingDINO (NEVER generic 'icon.' / 'grid.' which fire on text cards!)
 GROUNDING_DINO_PROMPTS: list[tuple[str, float]] = [
-    ("person.", 0.25),
-    ("face.", 0.25),
+    ("person.", 0.24),
+    ("face.", 0.22),
+    ("blurred photo.", 0.20),
+    ("photograph.", 0.24),
     ("car.", 0.25),
-    ("cube.", 0.22),
+    ("cube.", 0.20),
+    ("3d block.", 0.22),
     ("robot.", 0.24),
     ("microchip.", 0.24),
     ("gear.", 0.24),
     ("shield.", 0.24),
+    ("snowflake.", 0.22),
     ("book.", 0.25),
     ("document.", 0.25),
     ("database.", 0.24),
@@ -33,11 +37,13 @@ GROUNDING_DINO_PROMPTS: list[tuple[str, float]] = [
     ("satellite dish.", 0.20),
     ("antenna tower.", 0.23),
     ("waveform.", 0.24),
-    ("heatmap.", 0.24),
+    ("heatmap.", 0.22),
+    ("matrix grid.", 0.22),
+    ("noise pattern.", 0.22),
     ("bar chart.", 0.20),
     ("radar chart.", 0.23),
     ("ellipse.", 0.25),
-    ("checkerboard.", 0.24),
+    ("checkerboard.", 0.22),
 ]
 
 

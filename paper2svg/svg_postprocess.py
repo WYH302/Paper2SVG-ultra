@@ -406,18 +406,26 @@ def autofit_text_in_rects(svg_code: str) -> tuple[str, int]:
                     right["x0"], right["x1"] = right["ax"] - right["w"] / 2.0, right["ax"] + right["w"] / 2.0
                     adjusted += 1
 
-    # Pass 3: Keep `<text>` clear of overlapping `<image>` icons (e.g. `Occupancy` grazed by 3D cube on right)
+    # Pass 3: Keep `<text>` clear of overlapping `<image>` icons in all 4 directions
     if images:
         for tb in text_boxes:
             if len(tb["txt"]) <= 1:
                 continue
             for ix, iy, iw, ih in images:
+                # Ignore huge background photos where text is intentionally overlaid inside them
+                if iw > vb_w * 0.22 and ih > vb_h * 0.22:
+                    continue
                 ox = min(tb["x1"], ix + iw) - max(tb["x0"], ix)
                 oy = min(tb["y1"], iy + ih) - max(tb["y0"], iy)
                 if ox <= 2.0 or oy <= 2.0:
                     continue
-                # If text sits predominantly above the image (grazed bottom corner), nudge text up slightly!
-                if tb["y0"] < iy and oy <= tb["fs"] * 0.95:
+                t_cx = 0.5 * (tb["x0"] + tb["x1"])
+                t_cy = 0.5 * (tb["y0"] + tb["y1"])
+                i_cx = ix + 0.5 * iw
+                i_cy = iy + 0.5 * ih
+
+                # 3a. Text sits predominantly ABOVE the image (grazed bottom corner) -> nudge up
+                if tb["y0"] < iy and oy <= tb["fs"] * 0.95 and abs(t_cy - i_cy) >= abs(t_cx - i_cx) * 0.35:
                     shift_up = oy + 3.0
                     if shift_up <= 18.0:
                         tb["el"].set("y", f"{tb['ty'] - shift_up:.1f}")
@@ -426,7 +434,53 @@ def autofit_text_in_rects(svg_code: str) -> tuple[str, int]:
                         tb["y0"] -= shift_up
                         tb["y1"] -= shift_up
                         adjusted += 1
-                # If text sits to the left of the image and its right tail grazes the icon, shrink slightly to clear!
+                # 3b. Text sits predominantly BELOW a small icon -> nudge down
+                elif tb["y1"] > iy + ih and oy <= tb["fs"] * 1.15 and abs(t_cx - i_cx) <= max(iw, tb["w"]) * 0.45:
+                    shift_dn = (iy + ih + 3.0) - tb["y0"]
+                    if 0 < shift_dn <= 22.0:
+                        tb["el"].set("y", f"{tb['ty'] + shift_dn:.1f}")
+                        tb["ty"] += shift_dn
+                        tb["ay"] += shift_dn
+                        tb["y0"] += shift_dn
+                        tb["y1"] += shift_dn
+                        adjusted += 1
+                # 3c. Small icon sits to the LEFT of the text (e.g. pill icon grazing first letter) -> shift right / fit
+                elif i_cx < t_cx and iw <= 150 and ox <= tb["w"] * 0.60:
+                    needed_x0 = ix + iw + 6.0
+                    shift_r = needed_x0 - tb["x0"]
+                    if 0 < shift_r <= 80.0:
+                        encl = [
+                            rc
+                            for rc in rects
+                            if rc[0] - 2 <= tb["ax"] <= rc[0] + rc[2] + 2
+                            and rc[1] - 2 <= tb["ay"] <= rc[1] + rc[3] + 2
+                        ]
+                        max_x1 = min((rc[0] + rc[2] - 6.0) for rc in encl) if encl else (vb_x + vb_w - 8.0)
+                        avail = max(16.0, max_x1 - needed_x0)
+                        if tb["w"] > avail:
+                            new_fs = max(8.5, round(tb["fs"] * (avail / tb["w"]), 1))
+                            _set_font_size_css_safe(tb["el"], new_fs)
+                            tb["fs"] = new_fs
+                            tb["w"] = _measure_true_px(tb["txt"], new_fs, bold=tb["bold"], serif=tb["serif"])
+                        if tb["anchor"] == "middle":
+                            new_ax = needed_x0 + tb["w"] / 2.0
+                            tb["el"].set("x", f"{new_ax - tb['dx']:.1f}")
+                            tb["tx"] = new_ax - tb["dx"]
+                            tb["ax"] = new_ax
+                            tb["x0"], tb["x1"] = needed_x0, needed_x0 + tb["w"]
+                        elif tb["anchor"] == "start":
+                            tb["el"].set("x", f"{needed_x0 - tb['dx']:.1f}")
+                            tb["tx"] = needed_x0 - tb["dx"]
+                            tb["ax"] = needed_x0
+                            tb["x0"], tb["x1"] = needed_x0, needed_x0 + tb["w"]
+                        else:
+                            new_ax = needed_x0 + tb["w"]
+                            tb["el"].set("x", f"{new_ax - tb['dx']:.1f}")
+                            tb["tx"] = new_ax - tb["dx"]
+                            tb["ax"] = new_ax
+                            tb["x0"], tb["x1"] = needed_x0, new_ax
+                        adjusted += 1
+                # 3d. Text sits to the LEFT of the image and its right tail grazes the icon -> shrink slightly to clear
                 elif tb["x0"] < ix and ox <= tb["w"] * 0.45:
                     avail = max(12.0, (ix - 4.0) - tb["x0"])
                     if tb["w"] > avail:
@@ -441,9 +495,311 @@ def autofit_text_in_rects(svg_code: str) -> tuple[str, int]:
     return etree.tostring(root, encoding="unicode"), adjusted
 
 
+def _subpath_start_end(sub_d: str) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """Trace start & end coordinates of a simple M/L/H/V/l/h/v/Q/C SVG subpath (for branching-stem detection)."""
+    tokens = re.findall(r"[A-Za-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", sub_d)
+    if not tokens or tokens[0] != "M":
+        return None, None
+    idx = 1
+    try:
+        sx = cx = float(tokens[idx])
+        sy = cy = float(tokens[idx + 1])
+        idx += 2
+    except (IndexError, ValueError):
+        return None, None
+    cmd = "L"
+    while idx < len(tokens):
+        tk = tokens[idx]
+        if tk.isalpha():
+            cmd = tk
+            idx += 1
+            if cmd in ("Z", "z"):
+                cx, cy = sx, sy
+            continue
+        try:
+            if cmd == "L":
+                cx, cy = float(tokens[idx]), float(tokens[idx + 1])
+                idx += 2
+            elif cmd == "l":
+                cx += float(tokens[idx])
+                cy += float(tokens[idx + 1])
+                idx += 2
+            elif cmd == "H":
+                cx = float(tokens[idx])
+                idx += 1
+            elif cmd == "h":
+                cx += float(tokens[idx])
+                idx += 1
+            elif cmd == "V":
+                cy = float(tokens[idx])
+                idx += 1
+            elif cmd == "v":
+                cy += float(tokens[idx])
+                idx += 1
+            elif cmd == "Q":
+                cx, cy = float(tokens[idx + 2]), float(tokens[idx + 3])
+                idx += 4
+            elif cmd == "q":
+                cx += float(tokens[idx + 2])
+                cy += float(tokens[idx + 3])
+                idx += 4
+            elif cmd == "C":
+                cx, cy = float(tokens[idx + 4]), float(tokens[idx + 5])
+                idx += 6
+            elif cmd == "c":
+                cx += float(tokens[idx + 4])
+                cy += float(tokens[idx + 5])
+                idx += 6
+            else:
+                break
+        except (IndexError, ValueError):
+            break
+    return (sx, sy), (cx, cy)
+
+
+def fix_oversized_markers(svg_code: str) -> tuple[str, int]:
+    """Fix SVG `<marker>` & multi-arrow path bugs:
+      1. Force `markerUnits="userSpaceOnUse"` on any `<marker>` lacking it (prevents `stroke-width="8"` from
+         multiplying `markerWidth="10"` into an 80px giant pyramid!).
+      2. Split multi-subpath `<path d="M... M... M..." marker-end="url(...)">` into independent `<path>` nodes so
+         SVG draws arrowheads on EVERY arrow instead of ONLY the final subpath!
+      3. Strip duplicate `marker-end` from intermediate connected `<line>` elbow segments.
+      4. Auto-clone colored markers when a colored path/line (e.g. pink feedback stroke) references a black arrow.
+    """
+    try:
+        parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
+        root = etree.fromstring(svg_code.encode("utf-8"), parser=parser)
+    except Exception:
+        return svg_code, 0
+
+    fixes = 0
+    svg_ns = "http://www.w3.org/2000/svg"
+    tag_prefix = f"{{{svg_ns}}}" if root.tag.startswith(f"{{{svg_ns}}}") else ""
+
+    markers_by_id: dict[str, etree._Element] = {}
+    for mk in root.xpath(".//*[local-name()='marker']"):
+        mid = mk.get("id")
+        if mid:
+            markers_by_id[mid] = mk
+        units = (mk.get("markerUnits") or "").strip()
+        mw = _parse_float(mk.get("markerWidth"), 10.0) or 10.0
+        mh = _parse_float(mk.get("markerHeight"), 10.0) or 10.0
+        if units != "userSpaceOnUse":
+            if not mk.get("viewBox"):
+                mk.set("viewBox", f"0 0 {mw:g} {mh:g}")
+            mk.set("markerUnits", "userSpaceOnUse")
+            if mw > 13.0 or mh > 13.0:
+                scale = 11.0 / max(mw, mh)
+                mk.set("markerWidth", f"{max(7.0, mw * scale):.1f}")
+                mk.set("markerHeight", f"{max(7.0, mh * scale):.1f}")
+            fixes += 1
+        elif mw > 16.0 or mh > 16.0:
+            if not mk.get("viewBox"):
+                mk.set("viewBox", f"0 0 {mw:g} {mh:g}")
+            scale = 12.0 / max(mw, mh)
+            mk.set("markerWidth", f"{max(8.0, mw * scale):.1f}")
+            mk.set("markerHeight", f"{max(8.0, mh * scale):.1f}")
+            fixes += 1
+
+    css_rules = _parse_css_rules(root)
+
+    # Split multi-subpath `<path d="M... M..." marker-end="url(...)">` so every independent arrow gets its arrowhead!
+    for p_el in list(root.xpath(".//*[local-name()='path']")):
+        if _is_inside_non_rendered_def(p_el):
+            continue
+        me = _resolve_style_prop(p_el, "marker-end", css_rules)
+        if not me or "url(" not in me:
+            continue
+        d_raw = (p_el.get("d") or "").strip()
+        if not d_raw.startswith("M"):
+            continue
+        # Only split on uppercase absolute `M` (preserves relative `m` chevrons or segments inside one subpath)
+        parts = [seg.strip() for seg in re.split(r"(?=(?<!^)M)", d_raw) if seg.strip()]
+        if len(parts) < 2:
+            continue
+        parent = p_el.getparent()
+        if parent is None:
+            continue
+        # Detect T-junction stem subpaths whose endpoint feeds another subpath's start point
+        endpoints = [_subpath_start_end(seg) for seg in parts]
+        starts_pts = [ep[0] for ep in endpoints if ep[0] is not None]
+        insert_idx = parent.index(p_el)
+        for seg_i, seg in enumerate(parts):
+            clone = etree.fromstring(etree.tostring(p_el))
+            clone.set("d", seg)
+            if clone.get("id") and seg_i > 0:
+                clone.set("id", f"{clone.get('id')}_{seg_i}")
+            st_pt, en_pt = endpoints[seg_i]
+            is_stem = False
+            if st_pt is not None and en_pt is not None:
+                for k, other_st in enumerate(starts_pts):
+                    if k == seg_i:
+                        continue
+                    if (
+                        abs(en_pt[0] - other_st[0]) <= 3.0
+                        and abs(en_pt[1] - other_st[1]) <= 3.0
+                        and not (abs(st_pt[0] - other_st[0]) <= 3.0 and abs(st_pt[1] - other_st[1]) <= 3.0)
+                    ):
+                        is_stem = True
+                        break
+            if is_stem:
+                clone.set("marker-end", "none")
+                cur_st = clone.get("style") or ""
+                cur_st = re.sub(r"marker-end\s*:[^;]+;?", "", cur_st, flags=re.IGNORECASE).strip(" ;")
+                clone.set("style", f"{cur_st}; marker-end:none" if cur_st else "marker-end:none")
+            parent.insert(insert_idx + seg_i, clone)
+        parent.remove(p_el)
+        fixes += len(parts) - 1
+
+    lines = [el for el in root.xpath(".//*[local-name()='line']") if not _is_inside_non_rendered_def(el)]
+    starts = set()
+    for ln in lines:
+        x1, y1 = _parse_float(ln.get("x1")), _parse_float(ln.get("y1"))
+        if x1 is not None and y1 is not None:
+            starts.add((round(x1), round(y1)))
+    for ln in lines:
+        x1, y1 = _parse_float(ln.get("x1")), _parse_float(ln.get("y1"))
+        x2, y2 = _parse_float(ln.get("x2")), _parse_float(ln.get("y2"))
+        if None in (x1, y1, x2, y2):
+            continue
+        me = _resolve_style_prop(ln, "marker-end", css_rules)
+        if not me or "url(" not in me:
+            continue
+        ex, ey = round(x2), round(y2)
+        if any(
+            abs(ex - sx) <= 3 and abs(ey - sy) <= 3 and not (abs(round(x1) - sx) <= 3 and abs(round(y1) - sy) <= 3)
+            for sx, sy in starts
+        ):
+            ln.set("marker-end", "none")
+            cur_st = ln.get("style") or ""
+            cur_st = re.sub(r"marker-end\s*:[^;]+;?", "", cur_st, flags=re.IGNORECASE).strip(" ;")
+            ln.set("style", f"{cur_st}; marker-end:none" if cur_st else "marker-end:none")
+            fixes += 1
+
+    defs_el = root.find(f"{tag_prefix}defs")
+    cloned_cache: dict[tuple[str, str], str] = {}
+    for el in root.xpath(".//*[local-name()='path' or local-name()='line' or local-name()='polyline']"):
+        if _is_inside_non_rendered_def(el):
+            continue
+        me = el.get("marker-end") or ""
+        m_ref = re.search(r"url\(#([^)]+)\)", me)
+        if not m_ref:
+            continue
+        ref_id = m_ref.group(1)
+        src_mk = markers_by_id.get(ref_id)
+        if src_mk is None:
+            continue
+        stroke_col = (_resolve_style_prop(el, "stroke", css_rules) or "").strip().lower()
+        if not stroke_col or stroke_col in (
+            "none", "black", "#000", "#000000", "#111", "#111111", "#222", "#222222", "#333", "#333333"
+        ):
+            continue
+        mk_shapes = src_mk.xpath(".//*[local-name()='path' or local-name()='polygon']")
+        if not mk_shapes:
+            continue
+        mk_fill = (mk_shapes[0].get("fill") or "").strip().lower()
+        mk_stroke = (mk_shapes[0].get("stroke") or "").strip().lower()
+        is_dark_fill = mk_fill in ("black", "#000", "#000000", "#111", "#111111", "#222", "#222222", "")
+        is_dark_stroke = mk_fill == "none" and mk_stroke in ("black", "#000", "#000000", "#111", "#111111", "#222", "#222222", "#333", "#333333", "#666", "#666666")
+        if is_dark_fill or is_dark_stroke:
+            key = (ref_id, stroke_col)
+            new_id = cloned_cache.get(key)
+            if not new_id and defs_el is not None:
+                safe_col = re.sub(r"[^a-zA-Z0-9]", "", stroke_col)
+                new_id = f"{ref_id}_{safe_col}"
+                cloned = etree.fromstring(etree.tostring(src_mk))
+                cloned.set("id", new_id)
+                sw = _parse_float(_resolve_style_prop(el, "stroke-width", css_rules), 2.0) or 2.0
+                if sw >= 5.0:
+                    cloned.set("markerWidth", f"{min(18.0, sw * 2.2):.1f}")
+                    cloned.set("markerHeight", f"{min(18.0, sw * 2.2):.1f}")
+                for sh in cloned.xpath(".//*[local-name()='path' or local-name()='polygon']"):
+                    if (sh.get("fill") or "").strip().lower() == "none":
+                        sh.set("stroke", stroke_col)
+                    else:
+                        sh.set("fill", stroke_col)
+                defs_el.append(cloned)
+                cloned_cache[key] = new_id
+                markers_by_id[new_id] = cloned
+            if new_id:
+                el.set("marker-end", f"url(#{new_id})")
+                fixes += 1
+
+    return etree.tostring(root, encoding="unicode"), fixes
+
+
+_MATH_GLYPH_RE = re.compile(
+    r"[\u0300-\u036f\u2100-\u214f\u2190-\u22ff\u25a0-\u27bf\u0391-\u03c9\u1d2c-\u1d6a\u2070-\u209f]"
+)
+_MATH_FONT_FALLBACK = "'Cambria Math', 'Segoe UI Symbol', 'STIX Two Math', 'DejaVu Sans'"
+
+
+def fix_math_font_fallbacks(svg_code: str) -> tuple[str, int]:
+    """Prevent missing-glyph tofu boxes (`□`) in resvg-py by appending math/symbol font fallbacks
+    (`Cambria Math`, `Segoe UI Symbol`, `DejaVu Sans`) to CSS rules and `<text>` nodes containing math Unicode.
+    """
+    fixes = 0
+
+    def _patch_style_block(m: re.Match[str]) -> str:
+        nonlocal fixes
+        body = m.group(2)
+
+        def _patch_ff(fm: re.Match[str]) -> str:
+            nonlocal fixes
+            val = fm.group(1).strip()
+            if "cambria math" in val.lower():
+                return fm.group(0)
+            fixes += 1
+            return f"font-family:{val}, {_MATH_FONT_FALLBACK}"
+
+        body2 = re.sub(r"font-family\s*:\s*([^;}\n]+)", _patch_ff, body, flags=re.IGNORECASE)
+        return f"{m.group(1)}{body2}{m.group(3)}"
+
+    out = re.sub(r"(<style\b[^>]*>)([\s\S]*?)(</style>)", _patch_style_block, svg_code, flags=re.IGNORECASE)
+
+    try:
+        parser = etree.XMLParser(remove_blank_text=False, huge_tree=True)
+        root = etree.fromstring(out.encode("utf-8"), parser=parser)
+        changed = False
+        for t_el in root.xpath(".//*[local-name()='text']"):
+            full_txt = "".join(t_el.itertext())
+            if not _MATH_GLYPH_RE.search(full_txt):
+                continue
+            ff = t_el.get("font-family") or ""
+            if "cambria math" not in ff.lower():
+                base_ff = ff.strip() if ff.strip() else "Georgia, Arial, sans-serif"
+                if any(ch in full_txt for ch in ("\u0304", "\u0302", "\u211d", "\u2208", "\u2130", "\u2744", "\u2723")):
+                    t_el.set("font-family", f"{_MATH_FONT_FALLBACK}, {base_ff}")
+                    cur = t_el.get("style") or ""
+                    cur = re.sub(r"font-family\s*:[^;]+;?", "", cur, flags=re.IGNORECASE).strip(" ;")
+                    t_el.set(
+                        "style",
+                        f"{cur}; font-family:{_MATH_FONT_FALLBACK}, {base_ff}"
+                        if cur
+                        else f"font-family:{_MATH_FONT_FALLBACK}, {base_ff}",
+                    )
+                else:
+                    t_el.set("font-family", f"{base_ff}, {_MATH_FONT_FALLBACK}")
+                fixes += 1
+                changed = True
+        if changed:
+            out = etree.tostring(root, encoding="unicode")
+    except Exception:
+        pass
+
+    return out, fixes
+
+
 def postprocess_svg_deterministic(svg_code: str) -> tuple[str, dict[str, int]]:
-    """Run all deterministic 0.05s SVG geometry repairs cleanly."""
+    """Run all deterministic 0.05s SVG geometry, marker, math-font, and text-fit repairs cleanly."""
     s = sanitize_svg_numeric_typos(svg_code)
     s, n_arr = fix_collapsed_arrow_paths(s)
+    s, n_mk = fix_oversized_markers(s)
+    s, n_mf = fix_math_font_fallbacks(s)
     s, n_txt = autofit_text_in_rects(s)
-    return s, {"arrows_fixed": n_arr, "texts_autofit": n_txt}
+    return s, {
+        "arrows_fixed": n_arr,
+        "markers_fixed": n_mk,
+        "math_fonts_fixed": n_mf,
+        "texts_autofit": n_txt,
+    }

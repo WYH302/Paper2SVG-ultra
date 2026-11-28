@@ -243,7 +243,33 @@ def test_deterministic_svg_postprocess_arrows_autofit_siblings_and_images() -> N
     assert n_arr == 1
     assert "L725.0" in fixed_arr_svg and "L735.0 78.0" in fixed_arr_svg
 
-    # 3. CSS-safe box autofit + same-row sibling collision + image overlap nudger
+    # 3. Oversized marker scaling (`markerUnits="userSpaceOnUse"` + colored feedback marker cloning + elbow strip)
+    marker_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300">
+      <defs>
+        <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+          <path d="M0 0 L10 5 L0 10 z" fill="#111"/>
+        </marker>
+      </defs>
+      <line x1="100" y1="100" x2="200" y2="100" stroke="#111" stroke-width="3" marker-end="url(#arrow)"/>
+      <line x1="200" y1="100" x2="200" y2="180" stroke="#111" stroke-width="3" marker-end="url(#arrow)"/>
+      <path d="M600 200 H100 V150" fill="none" stroke="#f29377" stroke-width="8" marker-end="url(#arrow)"/>
+      <path d="M100 50h25M200 50h25M300 50h25" fill="none" stroke="#888" stroke-width="3" marker-end="url(#arrow)"/>
+      <rect x="480" y="20" width="220" height="44" rx="18" fill="#eef"/>
+      <image x="500" y="24" width="44" height="36" href="data:image/png;base64,iVBORw0KGgo="/>
+      <text x="580" y="48" text-anchor="middle" font-family="Arial" font-size="18">GRT geometry</text>
+      <text x="400" y="100" font-family="Georgia, serif" font-size="20">y&#x0304; &#x2208; &#x211d;</text>
+    </svg>"""
+    mk_fixed, mk_stats = postprocess_svg_deterministic(marker_svg)
+    assert mk_stats["markers_fixed"] >= 5
+    assert mk_stats["math_fonts_fixed"] >= 1
+    assert mk_stats["texts_autofit"] >= 1
+    assert 'd="M100 50h25"' in mk_fixed and 'd="M200 50h25"' in mk_fixed and 'd="M300 50h25"' in mk_fixed
+    assert 'markerUnits="userSpaceOnUse"' in mk_fixed
+    assert 'id="arrow_f29377"' in mk_fixed
+    assert 'marker-end="none"' in mk_fixed
+    assert "Cambria Math" in mk_fixed
+
+    # 4. CSS-safe box autofit + same-row sibling collision + image overlap nudger
     crowded_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" width="900" height="320">
       <style>
         .lbl { font-family: Arial, sans-serif; font-size: 22px; font-weight: 700; }

@@ -542,15 +542,21 @@ def vlm_filter_strict_icons(
     cand_preview = output_dir / "samed_candidates.png"
     Image.alpha_composite(rgba, overlay).convert("RGB").save(cand_preview, format="PNG")
 
-    prompt = f"""You are a STRICT semantic icon filter for AutoFigure-Edit.
+    prompt = f"""You are a semantic raster-asset selector for AutoFigure-Edit (converting a raster paper figure into an editable hybrid SVG).
 Image 1 is the clean figure. Image 2 shows {len(candidates)} numbered red candidate boxes (#1..#{len(candidates)}).
 
-KEEP ONLY boxes covering a **pure non-text visual icon / 3D graphic / photograph / waveform / heatmap / scatter plot / chart** with **ZERO readable words inside**:
-- KEEP: realistic photos (faces, chips, hardware), 3D voxel cubes/grids, cars/LiDAR, antenna towers, scatter/curve plots, waveforms, waterfalls, heatmaps, bar/radar charts, standalone icons (robot, calendar, document, books, database, signal antenna, magnifying glass, shield, satellite dish, gear, microchip, 3D cubes cluster, circular arrow WITHOUT swallowing words inside).
-- STRICTLY DROP:
-  * ANY box containing readable text words, titles, bullets, formulas, or card names!
-  * ANY box covering an arrow line, border line, or plain flat colored rectangle/timeline bar/1D token strip!
-  * ANY box that slices only half of an icon!
+CORE RULE: SVG vectors are great for text boxes, equations, flat diagrams, and arrows — but SVG **CANNOT** draw photorealistic images, natural textures, real photographs, blurred image progressions, or detailed 3D/scientific visuals!
+
+**KEEP (HIGHEST PRIORITY)**:
+1. **Photorealistic images & natural textures**: human faces (sharp OR blurred progression outputs), natural materials (marble/stone slabs, wood, hardware, chips, microscopy, medical/satellite images), 3D racks/cars/LiDAR/point clouds, heatmaps, covariance/spatial matrices, noise/checkerboard masks, complex charts/waveforms.
+   - **CRITICAL**: KEEP a photorealistic image / natural texture / slab / photo box **EVEN IF it has small overlaid badges, corner tags (`C1..C6`, `A+`), axis ticks (`x(m), y(m)`), or short labels (`Ω_gold`, `H_1`, `M=64`) on top of or touching it!** Losing a real photo forces SVG to fake it with ugly cartoon patterns.
+2. **Standalone visual icons & 3D graphics**: robots, documents, shields, calendars, gears, databases, satellites, microchips, 3D cubes/prisms, circular symbols, magnifying glasses, logos.
+   - If two candidate boxes overlap on the same visual asset (one tight around the photo/icon, one overly loose swallowing neighboring text cards), KEEP ONLY the tighter box!
+
+**STRICTLY DROP**:
+- Pure **UI text cards, flowchart boxes, module headers, bullet lists, standalone equations, or text-only pills** (boxes whose interior is mainly flat solid background + text/math, NOT a photograph/texture/icon).
+- Plain arrow lines, frame borders, or plain flat colored rectangles/1D bars.
+- Boxes that slice off half of a photo or icon.
 
 Return ONLY a compact JSON object like: {{"keep_ids": [2, 3, 6]}}"""
 
@@ -753,7 +759,7 @@ def crop_and_matte_icons(
         cropped.save(crop_path, format="PNG")
 
         bg_mode = str(box.get("bg_mode", "auto")).lower()
-        is_opaque_photo = (bg_mode == "opaque_rect") or (bg_mode == "auto" and looks_like_opaque_photo_tile(cropped))
+        is_opaque_photo = (bg_mode == "opaque_rect") or looks_like_opaque_photo_tile(cropped)
 
         info = {
             "id": box["id"],
@@ -854,9 +860,12 @@ def generate_autofigure_svg_template(
 
 CRITICAL ENGINEERING RULES:
 1. Exact 1:1 dimensions: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}">`.
-2. **CLEAN ARROWS (NEVER COLLAPSE INTO WEDGES!)**:
-   - Thin arrows: use `<line ... marker-end="url(#arrow)"/>` or open `<polyline fill="none" ... marker-end="url(#arrow)"/>`.
+2. **CLEAN ARROWS & MARKERS (NEVER GIANT PYRAMIDS OR MISSING HEADS!)**:
+   - EVERY `<marker>` MUST include `markerUnits="userSpaceOnUse"` with crisp `markerWidth="10" markerHeight="10"` (NEVER omit `markerUnits`, or thick strokes explode into giant black pyramids!). Use a matching colored `<marker>` for colored arrows.
+   - Use **ONE `<path>` per independent arrow** — NEVER pack multiple arrows into `<path d="M... M... M..." marker-end="..."/>` (SVG only draws `marker-end` on the very last subpath!).
+   - Multi-segment bent/orthogonal arrows MUST be ONE single `<path d="M... L... L..." fill="none" marker-end="url(#...)"/>` — NEVER split a bend into separate `<line marker-end="..."/>` segments (which puts stray arrowheads on corners!).
    - Thick block arrows: use a proper **7-point symmetric closed `<polygon>`**. NEVER write `M...h...l...v...z` in one short `<path>`!
+   - Preserve EVERY small visual sub-graphic from Image 1 (colored cohort bars, dot timelines, `+`/`-` badges) — never drop small visual elements.
 3. **FIT ALL TEXT INSIDE ITS BOX**: Match Image 1's font-family (serif vs sans, default `{font_family}`), weights, and compact font-sizes so EVERY label fits cleanly inside its enclosing `<rect>` with >= 6px horizontal margin.
 4. **CLEAN SUBSCRIPTS**: Reset baseline after every `<tspan dy="4">` via `<tspan dy="-4">`.
 5. **NO TOP TITLE OR BOTTOM BOASTING BANNERS**: NEVER add a top paper-title / "Figure 1: ..." header bar or a bottom marketing/claims/results slogan strip. If Image 1 has a standalone top title banner or bottom slogan/boasting bar unconnected to the architecture arrows, OMIT it cleanly (keep only architectural panels and compact symbol/color legends).
@@ -880,9 +889,12 @@ CRITICAL ENGINEERING RULES:
 </g>
 ```
    **ZERO DUPLICATE ARTWORK BEHIND PLACEHOLDERS**: Never draw icons, 3D cubes, or lines behind any `<g id="AF..">` box.
-3. **CLEAN ARROWS (NEVER COLLAPSE INTO WEDGES!)**:
-   - Thin arrows: ALWAYS use `<line ... marker-end="url(#arrow)"/>` or open `<polyline fill="none" ... marker-end="url(#arrow)"/>`.
+3. **CLEAN ARROWS & MARKERS (NEVER GIANT PYRAMIDS OR MISSING HEADS!)**:
+   - EVERY `<marker>` MUST include `markerUnits="userSpaceOnUse"` with crisp `markerWidth="10" markerHeight="10"` (NEVER omit `markerUnits`, or thick strokes explode into giant black pyramids!). Use a matching colored `<marker>` for colored arrows.
+   - Use **ONE `<path>` per independent arrow** — NEVER pack multiple arrows into `<path d="M... M... M..." marker-end="..."/>` (SVG only draws `marker-end` on the very last subpath!).
+   - Multi-segment bent/orthogonal arrows MUST be ONE single `<path d="M... L... L..." fill="none" marker-end="url(#...)"/>` — NEVER split a bend into separate `<line marker-end="..."/>` segments (which puts stray arrowheads on corners!).
    - Thick block arrows: ALWAYS draw a proper **7-point symmetric closed `<polygon>`** (top shaft -> head base -> wing -> tip -> opposite wing -> head base -> bottom shaft). **NEVER combine a shaft + head + `z` in one short `<path d="M...h...l...v...z"/>`!**
+   - Preserve EVERY small visual sub-graphic from Image 1 (colored cohort bars, dot timelines, `+`/`-` badges) — never drop small visual elements.
 4. **FIT ALL TEXT INSIDE ITS BOX**: Match Image 1's font-family (serif vs sans, fallback `{font_family}`), weights, and compact font-sizes so EVERY label fits cleanly INSIDE its enclosing `<rect>` with >= 6px horizontal margin and ZERO overlap against any `<g id="AF..">` placeholder!
 5. **CLEAN SUBSCRIPTS**: Reset baseline after every `<tspan dy="4">` via `<tspan dy="-4">`. Escape XML entities strictly (`&amp;`, `&lt;`, `&gt;`).
 6. **NO TOP TITLE OR BOTTOM BOASTING BANNERS**: NEVER add a top paper-title / "Figure 1: ..." header bar or a bottom marketing/claims/results slogan strip. If Image 1 has a standalone top title banner or bottom slogan/boasting bar unconnected to the architecture arrows, OMIT it cleanly (keep only architectural panels and compact symbol/color legends).
