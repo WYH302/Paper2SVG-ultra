@@ -1,4 +1,4 @@
-"""Configuration management for Paper2SVG-ultra."""
+"""Configuration management for Paper2SVG-ultra v2.0 (AIA Front-End + AutoFigure-Edit Back-End)."""
 
 from __future__ import annotations
 
@@ -28,6 +28,9 @@ ACADEMIC_DEFAULT_FONT_ZH = "Inter, 'Noto Sans SC', 'Microsoft YaHei', Helvetica,
 VALID_REASONING_EFFORTS = {"", "none", "low", "medium", "high", "xhigh"}
 VALID_SVG_MODES = {"hybrid_rich", "pure_vector"}
 VALID_DENSITY_MODES = {"auto", "concise", "detailed"}
+VALID_SVG_ENGINES = {"autofigure", "legacy"}
+VALID_SEG_BACKENDS = {"auto", "sam3_local", "sam3_fal", "sam3_roboflow", "vlm_zero_gpu"}
+VALID_MATTING_BACKENDS = {"auto", "rmbg2", "birefnet", "floodfill"}
 
 
 def resolve_density_mode(density: Optional[str], inventory_count: int = 0) -> str:
@@ -58,18 +61,34 @@ class Settings(BaseModel):
     image_size: str = Field(default="1536x1024")
     # 'hybrid_rich' (editable vector cards/text/arrows + crisp embedded visual assets) or 'pure_vector'
     svg_mode: str = Field(default="hybrid_rich")
+    # 'autofigure' (v2.0 true AutoFigure-Edit <AF>01 template -> optimize -> icon swap engine) or 'legacy'
+    svg_engine: str = Field(default="autofigure")
     # 'auto' (adaptive from label inventory), 'concise' (airy <=30 labels), or 'detailed' (dense systems diagram)
     density: str = Field(default="auto")
     disable_response_storage: bool = Field(default=True)
 
-    critic_rounds: int = Field(default=2, ge=1, le=4)
+    # Cut 1 (AIA Stage-4 Aesthetic & Anti-Copy Gate)
+    draft_review_rounds: int = Field(default=2, ge=0, le=3)
+
+    # Cut 2 (AutoFigure-Edit native segmentation / matting / 4K upscale)
+    seg_backend: str = Field(default="auto")
+    matting_backend: str = Field(default="auto")
+    sam_prompts: str = Field(default="icon,portrait,diagram,chart,object")
+    sam_min_score: float = Field(default=0.45, ge=0.05, le=0.95)
+    sam_merge_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    sam_max_masks: int = Field(default=32, ge=1, le=64)
+    sam_api_key: str = Field(default="")
+    rmbg_model_path: str = Field(default="")
+    enable_upscale_4k: bool = Field(default=False)
+
+    critic_rounds: int = Field(default=2, ge=0, le=4)
     font_family: str = Field(default=ACADEMIC_DEFAULT_FONT_EN)
     canvas_width: int = Field(default=1600)
     canvas_height: int = Field(default=680)  # ~2.35:1 wide banner default
     lang: str = Field(default="auto")  # auto | en | zh
 
     timeout_seconds: float = Field(default=600.0)
-    max_retries: int = Field(default=4)
+    max_retries: int = Field(default=5)
 
     server_host: str = Field(default="127.0.0.1")
     server_port: int = Field(default=8090)
@@ -117,9 +136,28 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
     if svg_mode not in VALID_SVG_MODES:
         svg_mode = "hybrid_rich"
 
+    svg_engine = os.getenv("SVG_ENGINE", "autofigure").strip().lower()
+    if svg_engine not in VALID_SVG_ENGINES:
+        svg_engine = "autofigure"
+
     density = os.getenv("DEFAULT_DENSITY", "auto").strip().lower()
     if density not in VALID_DENSITY_MODES:
         density = "auto"
+
+    seg_backend = os.getenv("SEG_BACKEND", "auto").strip().lower()
+    if seg_backend not in VALID_SEG_BACKENDS:
+        seg_backend = "auto"
+
+    matting_backend = os.getenv("MATTING_BACKEND", "auto").strip().lower()
+    if matting_backend not in VALID_MATTING_BACKENDS:
+        matting_backend = "auto"
+
+    sam_api_key = (
+        os.getenv("SAM_API_KEY")
+        or os.getenv("FAL_KEY")
+        or os.getenv("ROBOFLOW_API_KEY")
+        or ""
+    ).strip()
 
     return Settings(
         base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
@@ -131,14 +169,26 @@ def load_settings(env_path: Optional[Path] = None) -> Settings:
         image_quality=os.getenv("IMAGE_QUALITY", "high").strip(),
         image_size=os.getenv("IMAGE_SIZE", "1536x1024").strip(),
         svg_mode=svg_mode,
+        svg_engine=svg_engine,
         density=density,
         disable_response_storage=_bool("DISABLE_RESPONSE_STORAGE", True),
+        draft_review_rounds=int(os.getenv("DRAFT_REVIEW_ROUNDS", "2")),
+        seg_backend=seg_backend,
+        matting_backend=matting_backend,
+        sam_prompts=os.getenv("SAM_PROMPTS", "icon,portrait,diagram,chart,object").strip(),
+        sam_min_score=float(os.getenv("SAM_MIN_SCORE", "0.45")),
+        sam_merge_threshold=float(os.getenv("SAM_MERGE_THRESHOLD", "0.85")),
+        sam_max_masks=int(os.getenv("SAM_MAX_MASKS", "32")),
+        sam_api_key=sam_api_key,
+        rmbg_model_path=os.getenv("RMBG_MODEL_PATH", "").strip(),
+        enable_upscale_4k=_bool("ENABLE_UPSCALE_4K", False),
         critic_rounds=int(os.getenv("DEFAULT_CRITIC_ROUNDS", "2")),
         font_family=sanitize_font_family(os.getenv("DEFAULT_FONT_FAMILY", ACADEMIC_DEFAULT_FONT_EN)),
         canvas_width=int(os.getenv("DEFAULT_CANVAS_WIDTH", "1600")),
         canvas_height=int(os.getenv("DEFAULT_CANVAS_HEIGHT", "680")),
         lang=os.getenv("DEFAULT_LANG", "auto").strip().lower(),
         timeout_seconds=float(os.getenv("API_TIMEOUT_SECONDS", "600")),
+        max_retries=int(os.getenv("API_MAX_RETRIES", "5")),
         server_host=os.getenv("SERVER_HOST", "127.0.0.1").strip(),
         server_port=int(os.getenv("SERVER_PORT", "8090")),
     )

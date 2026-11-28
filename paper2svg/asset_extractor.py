@@ -418,10 +418,11 @@ def snap_bbox_to_foreground(
     py2: int,
     *,
     max_expand: int = 14,
+    ink_threshold: float = 36.0,
 ) -> tuple[int, int, int, int]:
     """Zero-GPU pixel-level boundary snapper: if a VLM coarse crop edge slices across a graphic's
-    dark/colored foreground pixels, gently step outward (up to `max_expand` px) until hitting a clean
-    blank background column/row, stopping immediately before crossing any enclosing panel wall.
+    foreground pixels (including light studio portrait frames), step outward (up to `max_expand` px)
+    until hitting a clean blank background column/row, stopping immediately before any panel wall.
     """
     h, w, _ = draft_arr.shape
     rx0 = max(0, px1 - max_expand)
@@ -432,9 +433,9 @@ def snap_bbox_to_foreground(
     if roi.size == 0:
         return px1, py1, px2, py2
 
-    # Estimate local card/canvas backdrop from the brightest 25% pixels in local ROI
+    # Estimate local card/canvas backdrop from the brightest 15% pixels in local ROI
     lum = 0.299 * roi[:, :, 0] + 0.587 * roi[:, :, 1] + 0.114 * roi[:, :, 2]
-    thr_lum = float(np.percentile(lum, 75))
+    thr_lum = float(np.percentile(lum, 85))
     bright_px = roi[lum >= thr_lum]
     if len(bright_px) < 16:
         return px1, py1, px2, py2
@@ -444,7 +445,7 @@ def snap_bbox_to_foreground(
         if slice_rgb.size == 0:
             return 0.0
         dists = np.linalg.norm(slice_rgb - bg_color, axis=-1)
-        return float(np.mean(dists > 36.0))
+        return float(np.mean(dists > ink_threshold))
 
     def _is_panel_wall_v(col_x: int, y0: int, y1: int) -> bool:
         """True if vertical column `col_x` continues as a solid line far above AND below [y0, y1]."""
@@ -609,14 +610,21 @@ def _crop_assets_from_specs(
         if (px2 - px1) < 16 or (py2 - py1) < 16:
             continue
 
-        # Zero-GPU pixel-boundary snap: recover any sliced border pixels cleanly
-        px1, py1, px2, py2 = snap_bbox_to_foreground(draft_arr, px1, py1, px2, py2, max_expand=12)
+        bg_mode = "remove_bg" if str(item.get("bg_mode", "")).strip().lower() == "remove_bg" else "opaque_rect"
+        rounded_rx = int(item.get("rounded_rx") or (4 if bg_mode == "opaque_rect" else 0))
+
+        # Zero-GPU pixel-boundary snap: recover sliced portrait/photo edges cleanly (up to 72px for photos!)
+        if bg_mode == "opaque_rect":
+            px1, py1, px2, py2 = snap_bbox_to_foreground(
+                draft_arr, px1, py1, px2, py2, max_expand=72, ink_threshold=14.0
+            )
+        else:
+            px1, py1, px2, py2 = snap_bbox_to_foreground(
+                draft_arr, px1, py1, px2, py2, max_expand=10, ink_threshold=34.0
+            )
 
         # Canonical AutoFigure-Edit style ID (AF01, AF02, ...) for unmistakable 1-to-1 mask matching
         slug = f"AF{len(extracted) + 1:02d}"
-
-        bg_mode = "remove_bg" if str(item.get("bg_mode", "")).strip().lower() == "remove_bg" else "opaque_rect"
-        rounded_rx = int(item.get("rounded_rx") or (4 if bg_mode == "opaque_rect" else 0))
 
         crop = draft_rgb.crop((px1, py1, px2, py2))
         if bg_mode == "remove_bg":
@@ -753,11 +761,11 @@ CURRENT PROPOSED BOXES ({len(current_specs)} items):
 ```
 
 AUDIT IMAGE 3 STRICTLY AGAINST IMAGE 1 & IMAGE 2:
-1. **MISSED VISUAL GRAPHICS CHECK (VERY IMPORTANT!)**: Scan EVERY panel left-to-right, top-to-bottom. Is there ANY visible non-text visual graphic NOT covered by a red box yet — such as a VLM/Critic emblem, neural network graph, waveform trace, device/monitor/laptop/probe, document icon, mini-workflow DAG, table/matrix graphic, skill-bar diagram, tool-strip graphic, stacked metric/waveform cards, or framed mini-screen thumbnail?! If ANY graphic was missed, **ADD IT** to `assets` with exact `bbox_1000` (so Stage 5 NEVER hand-draws ugly SVG icons)!
-2. **ZERO TEXT CLIPPING CHECK**: Does ANY red rectangle touch, graze, or cover ANY text title, card header, pill text, legend text, or caption directly above, below, or beside it? If YES, tighten `bbox_1000` using Image 2's grid so ZERO text letters remain inside!
-3. **TIGHT EDGE ALIGNMENT**: Does ANY red rectangle cut off part of an icon/graphic or include excess blank space? Snap `bbox_1000` tightly around the exact graphic!
-4. **DROP PLAIN BOXES / ARROWS**: Remove any red box that accidentally covered a plain text pill, outer pastel panel, or simple connector arrow.
-5. If ALL graphics are already covered cleanly with zero text clipping and tight alignment, set `"needs_adjustment": false`.
+1. **MISSED VISUAL GRAPHICS CHECK**: Scan left-to-right, top-to-bottom. Add any missed non-text visual graphic (`bbox_1000`) so the SVG builder never hand-draws ugly icons.
+2. **ZERO TEXT INSIDE BOXES (SPLIT STACKED BARS!)**: Does ANY red rectangle cover text labels (`c_sem`, `c_id`, `c_geo`, titles, captions, equations)? If a single tall box covers 3 stacked color bars AND swallows `c_id`/`c_geo` labels between them, **SPLIT IT into 3 separate tight horizontal bar boxes** so ZERO text sits inside any red box!
+3. **ZERO SLICED PORTRAITS OR CLIPPED OUTER ARROWS (CRITICAL!)**: Inspect EVERY portrait/face photo (`opaque_rect`) and EVERY radial vector field / scatter plot / 3D block: does ANY red box cut off part of a person's hair/ear/cheek/studio frame, or leave outer arrows/petals sticking OUTSIDE the red border? If YES, expand `bbox_1000` cleanly to include 100% of the photo/graphic!
+4. **DROP PLAIN BOXES / ARROWS**: Remove any red box covering a plain text pill, outer background panel, or simple arrow.
+5. Only set `"needs_adjustment": false` when EVERY box has zero clipped faces/arrows and zero swallowed text!
 
 Return ONLY valid JSON (no markdown fences, up to {max_assets} assets):
 {{
@@ -845,10 +853,11 @@ MUST CROP ALL OF THESE VISUAL GRAPHICS (SCAN EVERY SINGLE PANEL SYSTEMATICALLY!)
 - **Framed Preview Thumbnails** (mini screen/output preview cards like `Initial Output`, `Refined Output`, `Verified Output` inner visual graphic)
 
 STRICT EXCLUSION RULES (DO NOT INCLUDE THESE INSIDE ANY CROP BBOX!):
-1. **ZERO EDITABLE TEXT INSIDE CROPS**: NEVER include section titles, card headers, pill text, legend labels, or captions (`Target DUT`, `SDR Probe`, `f1/f2/f3`, `VLM`, `Recovery Network`, `SSIM / WER / TVLA`, `Verified Output`, etc.) inside any `bbox_1000`! Start `y1` strictly BELOW headers and end `y2` strictly ABOVE captions so 100% of text remains crisp native vector `<text>`!
-2. **NEVER crop outer pastel/tinted panels, white card backgrounds, dashed border frames, or colored text pills** — those are rebuilt cleanly as native vector `<rect>`!
-3. **NEVER crop inter-panel block arrows or simple straight connector arrows** — those are rebuilt cleanly as native vector arrows!
-4. **NO DUPLICATE OVERLAPPING BOXES**: Each graphic gets ONE clean non-overlapping tight bbox. (If a monitor + laptop + cable + waves + probe form one tightly coupled hardware scene, crop the clean graphic parts cleanly without covering `Target DUT` above or `SDR Probe` below.)
+1. **ZERO EDITABLE TEXT INSIDE CROPS (CRITICAL — SPLIT MULTI-ROW GRAPHICS!)**: NEVER include section titles, card headers, pill text, math symbols (`c_sem`, `c_id`, `c_geo`, `y`, `x_0 -> x_1`), legend labels, or captions inside any `bbox_1000`! If multiple horizontal color bars / thumbnails have text labels BETWEEN rows (e.g., `c_sem` above bar 1, `c_id` above bar 2, `c_geo` above bar 3), **EMIT ONE SEPARATE TIGHT BOX PER BAR** — NEVER one tall box that swallows the text labels in between!
+2. **NEVER SLICE FACES, PORTRAITS, OR OUTER ARROW RINGS**: For human portraits/photos (`opaque_rect`), ensure the box covers 100% of the rectangular photo edge-to-edge (all hair, ears, shoulders, studio backdrop — NEVER cut off the right/left side of a face!). For radial vector fields or plots, include 100% of the outer arrow ring and axes!
+3. **NEVER crop outer pastel/tinted panels, white card backgrounds, dashed border frames, or colored text pills** — those are rebuilt cleanly as native vector `<rect>`!
+4. **NEVER crop inter-panel block arrows or simple straight connector arrows** — those are rebuilt cleanly as native vector arrows!
+5. **NO DUPLICATE OVERLAPPING BOXES**: Each graphic gets ONE clean non-overlapping tight bbox.
 
 For each asset, choose `bg_mode`:
 - `"opaque_rect"`: for crisp rectangular framed spectrograms, photos, heatmaps, framed mini-screens, or shaded tables that fill a rectangle cleanly.
@@ -888,17 +897,28 @@ Return ONLY valid JSON (no markdown fences) with up to {max_assets} assets, orde
     )
 
     if extracted and verify_masks:
-        verify_path = output_dir / "stage1_draft_verify.png"
-        render_verification_overlay(draft_path, extracted, viewbox, verify_path)
-        adjusted, refined_specs = _verify_and_calibrate_asset_boxes(
-            client, draft_path, ruler_path, verify_path, extracted, max_assets=max_assets
-        )
-        if adjusted:
-            extracted = _crop_assets_from_specs(
+        # Up to 2 visual verification passes: Pass 1 fixes coarse shifts; Pass 2 verifies the calibrated
+        # overlay and catches any last clipped portrait edge, outer vector-field ring, or swallowed text!
+        for cal_round in range(1, 3):
+            verify_name = "stage1_draft_verify.png" if cal_round == 1 else "stage1_draft_verify_calibrated.png"
+            verify_path = output_dir / verify_name
+            render_verification_overlay(draft_path, extracted, viewbox, verify_path)
+            adjusted, refined_specs = _verify_and_calibrate_asset_boxes(
+                client, draft_path, ruler_path, verify_path, extracted, max_assets=max_assets
+            )
+            if not adjusted:
+                break
+            new_extracted = _crop_assets_from_specs(
                 refined_specs, draft_rgb, assets_dir, viewbox, max_assets=max_assets
             )
-            if extracted:
-                render_verification_overlay(draft_path, extracted, viewbox, output_dir / "stage1_draft_verify_calibrated.png")
+            if new_extracted:
+                extracted = new_extracted
+                if cal_round == 2:
+                    render_verification_overlay(
+                        draft_path, extracted, viewbox, output_dir / "stage1_draft_verify_final.png"
+                    )
+            else:
+                break
 
     # Save manifest (without giant base64 strings) for inspection & resume
     manifest_data = [

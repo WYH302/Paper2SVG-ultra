@@ -149,14 +149,15 @@ OBSERVE CAREFULLY ACROSS THE REFERENCE IMAGES:
    - Explicitly note whether heavy dark outlines or dashed frames should be AVOIDED!
 4. **Arrow & Connector Craft**:
    - Are arrows **wide filled colored block arrows** (orange/blue/gradient), **soft curved ribbons**, **thick pastel connectors**, or crisp minimal vectors?
-5. **PRIMARY STYLE WINNER RULE (CRITICAL — ZERO STYLE DILUTION!)**:
+5. **PRIMARY STYLE WINNER RULE (CRITICAL — ZERO STYLE DILUTION & PREFER AIRY PUBLICATION CRAFT!)**:
    - When multiple reference images are provided, **DO NOT average or blend conflicting aesthetics** across different images (e.g., never mix 3D glossy shading from one image with flat 2D black-bordered pastel cards from another)!
-   - Instead, pick the **SINGLE** visually cleanest, sharpest, most domain-fitting reference image (`top_anchor_indices`: `[winner_idx]`, strictly 1 index!) as the **Primary Style Winner**, and extract the palette, container borders, shadow policy, arrow craft, and rendering richness strictly from that single winner!
+   - Instead, pick the **SINGLE** visually cleanest, sharpest, most modern, open-canvas reference image (`top_anchor_indices`: `[winner_idx]`, strictly 1 index!) as the **Primary Style Winner** — strongly preferring airy, open-white, visually illustrative CVPR/NeurIPS/Nature frameworks with sleek physical/neural blocks and generous whitespace over cramped gray multi-card grids!
+   - Extract the palette, container borders, shadow policy, arrow craft, and rendering richness strictly from that single winner!
 6. **IGNORE REVIEW ANNOTATIONS & PAGE ARTIFACTS**:
    - Completely IGNORE any hand-drawn red/blue pen marks, review circles, highlighter scribbles, PDF figure captions (`Figure 1: ...`), page headers/footers, or watermarks overlaid on reference screenshots. Extract ONLY the clean underlying figure design!
 
-STRICT CONTENT ISOLATION:
-- NEVER copy, transcribe, or mention ANY paper-specific text labels, model names, datasets, or method modules from the reference images. Describe ONLY visual style, composition grammar, color hexes, typography feel, container style, arrow style, and illustration craft!
+STRICT CONTENT & SUBJECT ISOLATION:
+- NEVER copy, transcribe, or mention ANY paper-specific text labels, model names, datasets, faces/portraits/identities, or method modules from the reference images. Describe ONLY visual style, composition grammar, color hexes, typography feel, container style, arrow style, and illustration craft!
 
 OUTPUT FORMAT:
 Return ONLY valid JSON (no markdown fences) matching this schema (replace EVERY angle-bracket value with your ACTUAL visual observations from the Primary Style Winner image!):

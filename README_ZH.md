@@ -52,7 +52,8 @@
 | :---: | :---: | :--- |
 | **v1**<br>*流程图模具坑* | <img src="assets/showcase/physflow_v1_flowchart.png" width="480"/> | **坑 1（风格模板写死 + 纯矢量降维）：** Style Extractor 里不小心留了预设色板与圆角线宽示例，结果无论参考图多惊艳都被洗成了千篇一律的“灰蓝铜套娃黑框流程图”；更糟的是强行禁用 `<image>` 嵌图，把真实人脸逼成了卡通简笔画。 |
 | **v2**<br>*信息过载坑* | <img src="assets/showcase/physflow_v2_dense.png" width="480"/> | **坑 2（高推理模型不懂给 Figure 1 做减法）：** 解放参考图艺术指导并接入零 GPU 混合裁切嵌图后，画风立刻有了顶会质感——**但**深度推理模型把正文里的每个实现细节都抽了出来：**21 个模块、71 条文字、16 张碎小图**（连 `[224:240]` 切片、`55.9 FPS`、`Rank 16`、损失阈值全塞进主图），画面密密麻麻几乎没有留白。 |
-| **v3**<br>*Paper2SVG-ultra* | <img src="assets/showcase/physflow_v3_clean.png" width="480"/> | **坑 3 破局（信息减法硬预算 + 双栏实宽硬校验）：** 在 Stage 1 / 3 / 6 写入硬上限（**3–4 阶段、6–9 高层模块、12–24 条标签、3–6 个大视觉主角、≥35% 纯白呼吸空间**），再叠加 `700px` 双栏模拟体检，直接跑出 **24/24 精确标签、8 个高清可拖拽视觉主角、55.6% 留白、0 错 0 警** 的清爽顶会主图。 |
+| **v3 (v1.x)**<br>*减法预算版* | <img src="assets/showcase/physflow_v3_clean.png" width="480"/> | **坑 3 破局（信息减法硬预算 + 双栏实宽硬校验）：** 加入硬上限与 `700px` 双栏体检后画风干净了许多——但自研卡片规则在复杂方法论文上仍容易退化成“大灰框套红黄子框套药丸”的土味表单感。 |
+| **v2.0**<br>*双巨人三刀手术版* | <img src="assets/showcase/physflow_v20_final.png" width="480"/> | **坑 4 终极破局（停止闭门造车，站在双巨人肩膀上做三刀精准手术）：** 直接保留 **AIA-Academic-Illustrator** 的开放白底物理实体前端 + 新增 **Stage-4 底图审美与防抄袭闸门**（自动打回参考图撞脸与灰框表单），后端无缝对接 **AutoFigure-Edit** 原版 `<AF>01` 模板复刻 → `resvg-py` 视觉对齐 → 确定性透明图标替换 + 贴图后终检抛光（**100% 全自动、26 处高清可拖拽视觉资产、0 Linter 硬错误**）。 |
 
 <details>
 <summary><b>展开查看 v3 的 700px 双栏印刷实宽模拟图 & 零 GPU 资产遮罩图</b></summary>
@@ -92,12 +93,18 @@
 7. **开箱即用本地网页工作台**：内置 FastAPI 前端与 MIT 协议 `svg-edit` 画布，支持密度档位切换、蓝图暂停编辑续跑（`--from-stage 4`）、草图 vs 终稿对比，以及浏览器内拖拽改字并一键写回 `final.svg`。
 
 <details>
-<summary><b>v1.2.0 核心视觉重构日志（真正追平底图美学质感）</b></summary>
+<summary><b>v2.0.0 重磅架构升级：站在双巨人肩膀上的「三刀精准手术」</b></summary>
 
-- **零 GPU 全量图标抠图（`max_assets=28`，`AF01..AFNN`）**：将所有非文字图形（设备、波形、徽标、神经网络、DAG、频谱、矩阵表、工具条、缩略图）全部无损抠出贴回，让 LLM 只专注纯色面板、圆角卡片、厚实粗箭头与饱满纯黑可编辑文字，彻底杜绝涂鸦感。
-- **纯 NumPy 前景像素吸附 + 4 侧残字/开放残框剥离**：自动补全微切边框的像素边缘（`snap_bbox_to_foreground`），并自动净切图标底边误带的单行标注文字与开放式 C 形卡片残框，同时 100% 保护四边闭合相框与等高多行图形。
-- **原生 1:1 像素 `viewBox`**：废除非必要的画布小数缩放，直接按 `stage1_draft.png` 原生像素尺寸建模，消除坐标、线宽与字重漂移。
-- **逐箭头方向强制审计与底图还原严审**：Critic 必须在输出 SVG 前逐条比对每一根跨面板箭头的方向（`expected` vs `seen_in_iter`），自动翻转指反箭头，并按底图严格校验字重、配色与零碰撞。
+不再自己发明臃肿的第三套复杂规则，**v2.0.0** 直接保留 **AIA-Academic-Illustrator** 与 **AutoFigure-Edit** 两个开源巨人的真身主干，只做 3 刀精准工程手术：
+
+- **第一刀（前半程回归 AIA 真身 + 审美防抄袭闸门）**：
+  - 恢复 AIA 5 大布局与强物理/光路/3D 堆叠实体描述，显式封杀「均匀大灰框套红黄顶栏套椭圆形药丸 + 丑柱状图 + 巨型顶部 Training 废条」的 PPT 表单构图；
+  - 新增 **Stage-4 底图审美与防抄袭闸门（`--draft-review-rounds 2`）**：底图出炉后先自动过审（查撞脸/抄袭参考图、查退化灰框表单、查拼写与箭头），不达标直接定向重绘，并支持 `--pause-after-draft` 人工审阅通过后再进 SVG 重建。
+- **第二刀（后半程回归 AutoFigure-Edit 原生引擎，`paper2svg/autofigure_engine.py`）**：
+  - 原汁原味继承 `autofigure2.py` 核心链路：可选 **4K 等比例放大（`--upscale-4k`）** + 可插拔 **SAM3 分割**（`--seg-backend auto|sam3_local|sam3_fal|sam3_roboflow|vlm_zero_gpu`，未配 GPU/Key 时无缝回退至零 GPU 像素吸附定位器）+ 可插拔 **神经抠图**（`--matting-backend auto|rmbg2|birefnet|floodfill`，自动保护方形真实人像不被啃边）+ 极简 25 行 `<AF>01` 模板复刻 → `resvg-py` 渲染对齐优化 → 确定性透明图标替换 + **Step 5.5 贴图后终检抛光**；
+  - 支持 **`--input-figure <figure.png>`** 直接导入任何现成高清底图直通 AutoFigure-Edit 转可编辑 SVG。
+- **第三刀（底层 Windows 稳健工程底座）**：
+  - 全链路 OpenAI Responses API **SSE 流式传输 + 流内 `service_unavailable_error` / 过载退避重试**；Windows 零 DLL 纯 Rust **`resvg-py`** 全面替代 `cairosvg`；内置 **`svg-edit`** 在线拖拽精修工作台同步支持全部 v2.0 选项。
 
 </details>
 

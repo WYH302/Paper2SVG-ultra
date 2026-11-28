@@ -26,9 +26,18 @@ from paper2svg.asset_extractor import (
     verify_assets_preserved,
     _encode_pil_png_data_url,
 )
-from paper2svg.client import ResponsesAPIClient
+from paper2svg.autofigure_engine import (
+    _looks_like_opaque_photo_tile,
+    draw_samed_placeholder_image,
+    merge_overlapping_boxes,
+    replace_icons_in_svg,
+    resolve_matting_backend,
+    resolve_seg_backend,
+    upscale_image_to_4k_if_needed,
+)
+from paper2svg.client import ResponsesAPIClient, is_retryable_stream_error
 from paper2svg.config import Settings, load_settings, resolve_density_mode, sanitize_font_family
-from paper2svg.draft_generator import compute_svg_viewbox
+from paper2svg.draft_generator import audit_stage1_draft_aesthetics, compute_svg_viewbox
 from paper2svg.pdf_parser import extract_pdf_sections
 from paper2svg.style_extractor import discover_reference_images, extract_style_dna
 from paper2svg.svg_critic import check_critic_content_retention
@@ -273,6 +282,13 @@ def test_pixel_snapper_and_native_1to1_viewbox() -> None:
     assert nx1 <= 41, f"Expected left edge snapped back to <=41, got {nx1}"
     assert ny2 >= 94, f"Expected bottom edge snapped out to >=94, got {ny2}"
 
+    # Simulate a portrait photo with light cream backdrop (#F2EFEA) sliced 40px short on the right edge!
+    p_arr = np.full((260, 260, 3), 255, dtype=np.float32)
+    p_arr[20:240, 30:220] = [240, 236, 228]  # light studio portrait tile
+    p_arr[50:200, 60:190] = [110, 75, 60]    # face/hair inside portrait
+    px1, py1, px2, py2 = snap_bbox_to_foreground(p_arr, 30, 20, 178, 240, max_expand=72, ink_threshold=14.0)
+    assert px2 >= 218, f"Expected 40px-sliced portrait right edge recovered to >=218, got {px2}"
+
     # Verify compute_svg_viewbox preserves exact 1:1 native pixel dimensions
     img = Image.new("RGB", (2016, 756), (255, 255, 255))
     assert compute_svg_viewbox(img, get_archetype("framework")) == (2016, 756)
@@ -397,6 +413,136 @@ def test_primary_ref_and_single_style_winner_and_cli_flags() -> None:
     assert parsed.primary_ref == Path("ref.png")
 
 
+def test_v20_surgical_giants_aia_gate_autofigure_and_sse_retry() -> None:
+    # 1. SSE transient stream-error retry classifier (must retry overload/503, fail fast on daily quota!)
+    assert is_retryable_stream_error("{'type': 'service_unavailable_error', 'message': 'Our servers are currently overloaded.'}")
+    assert is_retryable_stream_error("503 temporarily unavailable")
+    assert not is_retryable_stream_error("DAILY_LIMIT_EXCEEDED: quota exhausted")
+    assert not is_retryable_stream_error("invalid_api_key")
+
+    # 2. AIA Stage-4 Aesthetic & Anti-Copy Gate deterministic enforcement
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        dummy_draft = td_path / "draft.png"
+        Image.new("RGB", (600, 300), (255, 255, 255)).save(dummy_draft)
+
+        class _LeakClient:
+            def generate_multimodal(self, contents, **kwargs):
+                return json.dumps(
+                    {
+                        "aesthetic_score_10": 9.2,
+                        "reference_content_leaked": True,
+                        "is_ppt_box_form": False,
+                        "text_or_arrow_errors": [],
+                        "revision_mode": "pass",
+                        "fix_instructions": "Change portrait subject",
+                    }
+                )
+
+        gate = audit_stage1_draft_aesthetics(
+            _LeakClient(), dummy_draft, "---BEGIN PROMPT---\n[EXACT TEXT INVENTORY]\n- \"A\"\n---END PROMPT---",
+            reference_paths=[], resolved_density="concise"
+        )
+        assert not gate["passed"] and gate["revision_mode"] == "regenerate_clean"
+
+        # 3. AutoFigure-Edit 4K upscale + overlapping box merge + samed.png + opaque photo protection + <AF>01 swap
+        small = Image.new("RGB", (1200, 600), (255, 255, 255))
+        up, did_up = upscale_image_to_4k_if_needed(small, target_long_edge=3840)
+        assert did_up and up.size == (3840, 1920)
+
+        merged = merge_overlapping_boxes(
+            [
+                {"x1": 100, "y1": 50, "x2": 220, "y2": 170, "score": 0.9},
+                {"x1": 104, "y1": 52, "x2": 218, "y2": 168, "score": 0.7},
+                {"x1": 400, "y1": 50, "x2": 520, "y2": 170, "score": 0.85},
+            ],
+            overlap_threshold=0.85,
+        )
+        assert len(merged) == 2
+        assert merged[0]["label"] == "<AF>01" and merged[1]["label"] == "<AF>02"
+
+        samed_out = draw_samed_placeholder_image(small, merged, td_path / "samed.png")
+        assert samed_out.is_file()
+
+        # Verify opaque photo detector distinguishes natural multi-color border from white-background icon
+        rng = np.random.default_rng(42)
+        photo_tile = Image.fromarray(rng.integers(20, 180, size=(80, 80, 3), dtype=np.uint8), mode="RGB")
+        icon_tile = Image.new("RGB", (80, 80), (255, 255, 255))
+        assert _looks_like_opaque_photo_tile(photo_tile) is True
+        assert _looks_like_opaque_photo_tile(icon_tile) is False
+
+        # Verify replace_icons_in_svg handles <g id="AF01" transform="translate(20, 10)"> and renders cleanly via resvg-py
+        icon_png = td_path / "icon_AF01_nobg.png"
+        ic_arr = np.zeros((60, 60, 4), dtype=np.uint8)
+        ic_arr[10:50, 10:50] = [37, 99, 235, 255]
+        Image.fromarray(ic_arr, mode="RGBA").save(icon_png)
+
+        tmpl = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 400" width="800" height="400">
+          <rect width="800" height="400" fill="#FFFFFF"/>
+          <g id="AF01" transform="translate(20, 10)">
+            <rect x="80" y="40" width="120" height="120" fill="#808080" stroke="black" stroke-width="2"/>
+            <text x="140" y="100" text-anchor="middle" fill="white">&lt;AF&gt;01</text>
+          </g>
+        </svg>"""
+        swapped, cnt = replace_icons_in_svg(
+            tmpl,
+            [
+                {
+                    "id": 0,
+                    "label": "<AF>01",
+                    "label_clean": "AF01",
+                    "x1": 100,
+                    "y1": 50,
+                    "width": 120,
+                    "height": 120,
+                    "orig_x1": 100,
+                    "orig_y1": 50,
+                    "orig_width": 120,
+                    "orig_height": 120,
+                    "bg_mode": "remove_bg",
+                    "rounded_rx": 0,
+                    "nobg_path": str(icon_png),
+                }
+            ],
+            figure_size=(800, 400),
+        )
+        assert cnt == 1
+        assert 'id="icon_AF01"' in swapped and 'x="100.0" y="50.0"' in swapped
+        assert "&lt;AF&gt;01" not in swapped
+
+        out_full = td_path / "swapped_full.png"
+        out_2col = td_path / "swapped_2col.png"
+        render_dual_preview(swapped, out_full, out_2col, viewbox=(800, 400), full_zoom=1.0)
+        with Image.open(out_full) as r_im:
+            r_arr = np.array(r_im.convert("RGB"))
+            patch = r_arr[60:160, 110:210]
+            assert int(np.sum((patch[:, :, 2] > 180) & (patch[:, :, 0] < 100))) > 500
+
+    # 4. Auto backend resolution & v2.0 CLI flags
+    assert resolve_seg_backend("vlm_zero_gpu") == "vlm_zero_gpu"
+    assert resolve_matting_backend("floodfill") == "floodfill"
+    parser = cli_run.build_parser()
+    parsed = parser.parse_args(
+        [
+            "--input-figure",
+            "hero.png",
+            "--svg-engine",
+            "autofigure",
+            "--seg-backend",
+            "vlm_zero_gpu",
+            "--matting-backend",
+            "floodfill",
+            "--pause-after-draft",
+            "--draft-review-rounds",
+            "2",
+        ]
+    )
+    assert parsed.input_figure == Path("hero.png")
+    assert parsed.svg_engine == "autofigure"
+    assert parsed.pause_after_draft is True
+    assert parsed.draft_review_rounds == 2
+
+
 def test_fastapi_endpoints_and_svgedit() -> None:
     client = TestClient(app)
     r_home = client.get("/")
@@ -404,7 +550,9 @@ def test_fastapi_endpoints_and_svgedit() -> None:
     r_cfg = client.get("/api/config")
     assert r_cfg.status_code == 200
     cfg = r_cfg.json()
+    assert cfg["version"] == "2.0.0"
     assert cfg["main_model"]
+    assert cfg["svg_engine"] in ("autofigure", "legacy")
     assert cfg["svg_mode"] in ("hybrid_rich", "pure_vector")
     assert cfg["density"] in ("auto", "concise", "detailed")
     assert cfg["svg_edit_url"] == "/svg-edit/editor/index.html"

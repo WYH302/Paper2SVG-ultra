@@ -1,4 +1,4 @@
-"""FastAPI Web Workbench for Paper2SVG-ultra with bundled svg-edit interactive canvas."""
+"""FastAPI Web Workbench for Paper2SVG-ultra v2.0 (AIA Front-End + AutoFigure-Edit Back-End + svg-edit)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from paper2svg.archetypes import ARCHETYPES
+from paper2svg.autofigure_engine import resolve_matting_backend, resolve_seg_backend
 from paper2svg.config import PROJECT_ROOT, load_settings
 from paper2svg.pipeline import run_pipeline
 from paper2svg.svg_linter import validate_svg_xml
@@ -28,6 +29,7 @@ OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
 WEB_DIR = PROJECT_ROOT / "web"
 ASSETS_DIR = PROJECT_ROOT / "assets"
+
 
 def _find_svg_edit_dir() -> Optional[Path]:
     for candidate in (
@@ -39,12 +41,13 @@ def _find_svg_edit_dir() -> Optional[Path]:
             return candidate
     return None
 
+
 SVG_EDIT_DIR = _find_svg_edit_dir()
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Paper2SVG-ultra Workbench")
+app = FastAPI(title="Paper2SVG-ultra v2.0 Workbench")
 
 # Mount bundled MIT-licensed svg-edit canvas
 if SVG_EDIT_DIR is not None:
@@ -55,7 +58,7 @@ if SVG_EDIT_DIR is not None:
 class JobState:
     job_id: str
     output_dir: Path
-    status: str = "running"  # running | paused_after_schema | completed | failed
+    status: str = "running"  # running | paused_after_schema | paused_after_draft | completed | failed
     error: Optional[str] = None
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[queue.Queue] = field(default_factory=list)
@@ -75,8 +78,17 @@ ALLOWED_ARTIFACTS = {
     "final.svg",
     "final.png",
     "print_preview_2col.png",
+    "figure.png",
+    "samed.png",
+    "boxlib.json",
+    "template.svg",
+    "optimized_template.svg",
     "stage1_draft.png",
     "stage1_draft_raw.png",
+    "stage1_draft_v1.png",
+    "stage1_draft_v2.png",
+    "stage1_draft_v3.png",
+    "stage1_draft_v4.png",
     "stage1_draft_ruler.png",
     "stage1_draft_verify.png",
     "stage1_draft_verify_calibrated.png",
@@ -92,6 +104,7 @@ ALLOWED_ARTIFACTS = {
     "run_manifest.json",
     "stage4_render_prompt.txt",
     "stage4_meta.json",
+    "stage4_gate_report.json",
 }
 
 
@@ -107,19 +120,25 @@ def _safe_job_dir(job_id: str) -> Path:
 def _start_pipeline_thread(
     job: JobState,
     *,
-    paper_pdf: Path,
+    paper_pdf: Optional[Path],
+    input_figure: Optional[Path] = None,
     refs_dir: Optional[Path],
     lang: str,
     archetype: Optional[str],
     critic_rounds: int,
+    draft_review_rounds: Optional[int] = None,
     main_model: Optional[str],
     reasoning_effort: Optional[str],
     image_model: Optional[str],
     svg_mode: Optional[str],
+    svg_engine: Optional[str] = None,
+    seg_backend: Optional[str] = None,
+    matting_backend: Optional[str] = None,
     density: Optional[str] = None,
     primary_ref: Optional[Path] = None,
     from_stage: int = 1,
     pause_after_schema: bool = False,
+    pause_after_draft: bool = False,
 ) -> None:
     def _worker() -> None:
         try:
@@ -132,34 +151,54 @@ def _start_pipeline_thread(
                 settings.image_tool_model = image_model.strip()
             if svg_mode and svg_mode.strip():
                 settings.svg_mode = svg_mode.strip().lower()
+            if svg_engine and svg_engine.strip():
+                settings.svg_engine = svg_engine.strip().lower()
+            if seg_backend and seg_backend.strip():
+                settings.seg_backend = seg_backend.strip().lower()
+            if matting_backend and matting_backend.strip():
+                settings.matting_backend = matting_backend.strip().lower()
             if density and density.strip():
                 settings.density = density.strip().lower()
 
             def _on_event(evt_type: str, payload: dict[str, Any]) -> None:
                 job.push(evt_type, payload)
 
+            stop_stage = 3 if pause_after_schema else (4 if pause_after_draft else None)
             res = run_pipeline(
                 paper_pdf=paper_pdf,
+                input_figure=input_figure,
                 refs_dir=refs_dir,
                 output_dir=job.output_dir,
                 settings=settings,
                 lang=lang,
                 archetype_override=archetype or None,
                 svg_mode_override=settings.svg_mode,
+                svg_engine_override=settings.svg_engine,
                 density_override=settings.density,
                 primary_ref=primary_ref,
+                seg_backend_override=settings.seg_backend,
+                matting_backend_override=settings.matting_backend,
+                draft_review_rounds=draft_review_rounds,
                 critic_rounds=critic_rounds,
                 from_stage=from_stage,
-                stop_after_stage=3 if pause_after_schema else None,
+                stop_after_stage=stop_stage,
                 on_event=_on_event,
             )
-            job.status = "paused_after_schema" if pause_after_schema else "completed"
+            if pause_after_schema:
+                job.status = "paused_after_schema"
+            elif pause_after_draft:
+                job.status = "paused_after_draft"
+            else:
+                job.status = "completed"
             job.push(
                 "done",
                 {
                     "status": job.status,
                     "job_id": job.job_id,
                     "archetype": res.archetype,
+                    "svg_engine": res.svg_engine,
+                    "seg_backend": res.seg_backend,
+                    "matting_backend": res.matting_backend,
                     "viewbox": list(res.viewbox),
                     "elapsed_seconds": res.elapsed_seconds,
                 },
@@ -189,14 +228,25 @@ def get_sponsor_qr() -> FileResponse:
 @app.get("/api/config")
 def get_config() -> JSONResponse:
     s = load_settings()
-    svg_edit_url = "/svg-edit/editor/index.html" if (SVG_EDIT_DIR is not None and (SVG_EDIT_DIR / "editor" / "index.html").is_file()) else None
+    svg_edit_url = (
+        "/svg-edit/editor/index.html"
+        if (SVG_EDIT_DIR is not None and (SVG_EDIT_DIR / "editor" / "index.html").is_file())
+        else None
+    )
     return JSONResponse(
         {
+            "version": "2.0.0",
             "main_model": s.main_model,
             "reasoning_effort": s.reasoning_effort,
             "image_tool_model": s.image_tool_model,
             "image_quality": s.image_quality,
             "svg_mode": s.svg_mode,
+            "svg_engine": s.svg_engine,
+            "seg_backend": s.seg_backend,
+            "resolved_seg_backend": resolve_seg_backend(s.seg_backend, s.sam_api_key),
+            "matting_backend": s.matting_backend,
+            "resolved_matting_backend": resolve_matting_backend(s.matting_backend, s.rmbg_model_path),
+            "draft_review_rounds": s.draft_review_rounds,
             "density": s.density,
             "critic_rounds": s.critic_rounds,
             "font_family": s.font_family,
@@ -232,6 +282,11 @@ def list_runs() -> JSONResponse:
                 meta = {}
         live_job = JOBS.get(d.name)
         status = live_job.status if live_job else meta.get("status", "completed" if (d / "final.svg").is_file() else "unknown")
+        src_name = d.name
+        if meta.get("paper_pdf"):
+            src_name = Path(meta["paper_pdf"]).name
+        elif meta.get("input_figure"):
+            src_name = Path(meta["input_figure"]).name
         runs.append(
             {
                 "job_id": d.name,
@@ -239,8 +294,9 @@ def list_runs() -> JSONResponse:
                 "created_at": meta.get("created_at", datetime.fromtimestamp(d.stat().st_mtime).isoformat(timespec="seconds")),
                 "archetype": meta.get("archetype", ""),
                 "archetype_name": meta.get("archetype_name", ""),
+                "svg_engine": meta.get("svg_engine", "autofigure"),
                 "viewbox": meta.get("viewbox"),
-                "paper_name": Path(meta["paper_pdf"]).name if meta.get("paper_pdf") else d.name,
+                "paper_name": src_name,
                 "has_final_svg": (d / "final.svg").is_file(),
                 "has_schema": (d / "schema.md").is_file(),
                 "has_draft": (d / "stage1_draft.png").is_file(),
@@ -251,32 +307,50 @@ def list_runs() -> JSONResponse:
 
 @app.post("/api/run")
 async def start_run(
-    paper_pdf: UploadFile = File(...),
+    paper_pdf: Optional[UploadFile] = File(default=None),
+    input_figure: Optional[UploadFile] = File(default=None),
     ref_images: list[UploadFile] = File(default=[]),
     refs_dir_path: str = Form(default=""),
     primary_ref_path: str = Form(default=""),
     lang: str = Form(default="auto"),
     archetype: str = Form(default=""),
     critic_rounds: int = Form(default=2),
+    draft_review_rounds: int = Form(default=2),
     main_model: str = Form(default=""),
     reasoning_effort: str = Form(default=""),
     image_model: str = Form(default=""),
     svg_mode: str = Form(default=""),
+    svg_engine: str = Form(default="autofigure"),
+    seg_backend: str = Form(default="auto"),
+    matting_backend: str = Form(default="auto"),
     density: str = Form(default="auto"),
     pause_after_schema: bool = Form(default=False),
+    pause_after_draft: bool = Form(default=False),
 ) -> JSONResponse:
+    has_pdf = paper_pdf is not None and bool(paper_pdf.filename)
+    has_fig = input_figure is not None and bool(input_figure.filename)
+    if not has_pdf and not has_fig:
+        raise HTTPException(status_code=400, detail="Please upload a paper PDF or an existing raster figure.")
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     short_uid = uuid.uuid4().hex[:6]
-    orig_stem = Path(paper_pdf.filename or "paper.pdf").stem
+    orig_stem = Path((paper_pdf.filename if has_pdf else input_figure.filename) or "paper").stem  # type: ignore[union-attr]
     safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", orig_stem)[:28].strip("_") or "paper"
     job_id = f"{safe_stem}_{stamp}_{short_uid}"
 
     upload_dir = UPLOADS_DIR / job_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    saved_pdf = upload_dir / (Path(paper_pdf.filename or "paper.pdf").name)
-    saved_pdf.write_bytes(await paper_pdf.read())
 
-    # Resolve reference folder: uploaded files take priority; else optional local folder path
+    saved_pdf: Optional[Path] = None
+    if has_pdf and paper_pdf is not None:
+        saved_pdf = upload_dir / Path(paper_pdf.filename or "paper.pdf").name
+        saved_pdf.write_bytes(await paper_pdf.read())
+
+    saved_fig: Optional[Path] = None
+    if has_fig and input_figure is not None:
+        saved_fig = upload_dir / Path(input_figure.filename or "figure.png").name
+        saved_fig.write_bytes(await input_figure.read())
+
     resolved_refs_dir: Optional[Path] = None
     valid_uploads = [f for f in ref_images if f and f.filename]
     if valid_uploads:
@@ -307,18 +381,24 @@ async def start_run(
     _start_pipeline_thread(
         job,
         paper_pdf=saved_pdf,
+        input_figure=saved_fig,
         refs_dir=resolved_refs_dir,
         lang=lang,
         archetype=archetype.strip() or None,
-        critic_rounds=max(1, min(4, int(critic_rounds))),
+        critic_rounds=max(0, min(4, int(critic_rounds))),
+        draft_review_rounds=max(0, min(3, int(draft_review_rounds))),
         main_model=main_model.strip() or None,
         reasoning_effort=reasoning_effort.strip() or None,
         image_model=image_model.strip() or None,
         svg_mode=svg_mode.strip() or None,
+        svg_engine=svg_engine.strip() or "autofigure",
+        seg_backend=seg_backend.strip() or "auto",
+        matting_backend=matting_backend.strip() or "auto",
         density=density.strip() or None,
         primary_ref=resolved_primary_ref,
         from_stage=1,
         pause_after_schema=pause_after_schema,
+        pause_after_draft=pause_after_draft,
     )
     return JSONResponse({"job_id": job_id, "status": "running"})
 
@@ -327,11 +407,16 @@ class ResumeRequest(BaseModel):
     from_stage: int = 4
     schema_md: Optional[str] = None
     critic_rounds: int = 2
+    draft_review_rounds: Optional[int] = None
     image_model: Optional[str] = None
     main_model: Optional[str] = None
     reasoning_effort: Optional[str] = None
     svg_mode: Optional[str] = None
+    svg_engine: Optional[str] = None
+    seg_backend: Optional[str] = None
+    matting_backend: Optional[str] = None
     density: Optional[str] = None
+    pause_after_draft: bool = False
 
 
 @app.post("/api/runs/{job_id}/resume")
@@ -345,7 +430,7 @@ def resume_run(job_id: str, req: ResumeRequest) -> JSONResponse:
 
     manifest_file = out_dir / "run_manifest.json"
     manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.is_file() else {}
-    paper_pdf = Path(manifest.get("paper_pdf", ""))
+    paper_pdf = Path(manifest["paper_pdf"]) if manifest.get("paper_pdf") else None
     refs_dir = Path(manifest["refs_dir"]) if manifest.get("refs_dir") else None
     primary_ref = Path(manifest["primary_ref"]) if manifest.get("primary_ref") else None
 
@@ -358,15 +443,20 @@ def resume_run(job_id: str, req: ResumeRequest) -> JSONResponse:
         refs_dir=refs_dir,
         lang=manifest.get("lang", "auto"),
         archetype=manifest.get("archetype") or None,
-        critic_rounds=max(1, min(4, req.critic_rounds)),
+        critic_rounds=max(0, min(4, req.critic_rounds)),
+        draft_review_rounds=req.draft_review_rounds,
         main_model=req.main_model or manifest.get("main_model"),
         reasoning_effort=req.reasoning_effort or manifest.get("reasoning_effort"),
         image_model=req.image_model or manifest.get("image_tool_model"),
         svg_mode=req.svg_mode or manifest.get("svg_mode"),
+        svg_engine=req.svg_engine or manifest.get("svg_engine"),
+        seg_backend=req.seg_backend or manifest.get("seg_backend"),
+        matting_backend=req.matting_backend or manifest.get("matting_backend"),
         density=req.density or manifest.get("density"),
         primary_ref=primary_ref,
         from_stage=max(1, min(6, req.from_stage)),
         pause_after_schema=False,
+        pause_after_draft=req.pause_after_draft,
     )
     return JSONResponse({"job_id": job_id, "status": "running", "from_stage": req.from_stage})
 
@@ -444,7 +534,6 @@ def save_edited_svg(job_id: str, req: SaveSvgRequest) -> JSONResponse:
     final_svg_path = out_dir / "final.svg"
     final_svg_path.write_text(req.svg_code, encoding="utf-8")
 
-    # Parse viewBox for re-render
     m = re.search(r'viewBox="[^"]*?(\d+(?:\.\d+)?)[\s,]+(\d+(?:\.\d+)?)\s*"', req.svg_code)
     vb = (int(float(m.group(1))), int(float(m.group(2)))) if m else (1600, 680)
     render_dual_preview(

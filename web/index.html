@@ -272,9 +272,14 @@
       <div class="card">
         <h2>1. 输入论文 PDF 与参考图文件夹</h2>
         <form id="runForm">
-          <label>整篇论文 PDF（必选）</label>
+          <label>整篇论文 PDF（或下方直接导入现成高清底图）</label>
           <div class="file-box">
-            <input type="file" id="paperPdf" accept=".pdf" required />
+            <input type="file" id="paperPdf" accept=".pdf" />
+          </div>
+
+          <label>可选：直接导入现成高清底图（跳过 Stage 1–4，直通 AutoFigure-Edit 转可编辑 SVG）</label>
+          <div class="file-box">
+            <input type="file" id="inputFigure" accept="image/*" />
           </div>
 
           <label>参考图文件夹（上传多张顶会参考图，借骨架与画风）</label>
@@ -351,9 +356,31 @@
             </div>
           </div>
 
+          <div class="row2">
+            <div>
+              <label>SVG 引擎 (Cut 2)</label>
+              <select id="svgEngine">
+                <option value="autofigure" selected>AutoFigure-Edit 原生引擎（v2.0 推荐）</option>
+                <option value="legacy">Legacy 引擎</option>
+              </select>
+            </div>
+            <div>
+              <label>Stage-4 底图审美闸门轮数</label>
+              <select id="draftReviewRounds">
+                <option value="2" selected>2 轮自动把关（推荐）</option>
+                <option value="1">1 轮</option>
+                <option value="0">关闭自动重绘</option>
+              </select>
+            </div>
+          </div>
+
           <label class="check-row">
             <input type="checkbox" id="pauseAfterSchema" />
             生成视觉蓝图 (`schema.md`) 后暂停，让我确认/微调再出图
+          </label>
+          <label class="check-row" style="margin-top:6px;">
+            <input type="checkbox" id="pauseAfterDraft" />
+            Stage-4 底图 (`stage1_draft.png`) 出炉后暂停，满意再进 AutoFigure-Edit 转 SVG
           </label>
 
           <button type="submit" class="btn-primary" id="startBtn">开始生成顶会可编辑 SVG</button>
@@ -412,8 +439,12 @@
 
         <!-- Tab: Compare -->
         <div id="tab-compare" class="stage-canvas hidden">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <span style="font-size:12px;color:var(--muted);">如开启 Stage-4 暂停或想重跑 AutoFigure-Edit，可先审阅底图再一键继续转可编辑 SVG：</span>
+            <button class="btn-ok" type="button" id="resumeDraftBtn">满意底图，从 Stage 5 转可编辑 SVG</button>
+          </div>
           <div class="compare-grid" id="compareWrap">
-            <div style="color:var(--muted);font-size:13px;">完成后此处对比 Stage-1 构图锚图与最终纯 SVG 渲染效果。</div>
+            <div style="color:var(--muted);font-size:13px;">完成后此处对比 Stage-1 构图锚图、AutoFigure 掩码与最终 SVG 渲染效果。</div>
           </div>
         </div>
 
@@ -481,10 +512,13 @@
       document.getElementById("reasoningEffort").value = cfg.reasoning_effort || "high";
       document.getElementById("imageModel").value = cfg.image_tool_model || "";
       document.getElementById("svgMode").value = cfg.svg_mode || "hybrid_rich";
+      document.getElementById("svgEngine").value = cfg.svg_engine || "autofigure";
+      document.getElementById("draftReviewRounds").value = String(cfg.draft_review_rounds ?? 2);
       document.getElementById("density").value = cfg.density || "auto";
       document.getElementById("criticRounds").value = String(cfg.critic_rounds || 2);
       const imgLabel = cfg.image_tool_model || "default image_gen";
       document.getElementById("badgeModels").textContent = `${cfg.main_model} (${cfg.reasoning_effort || "high"}) + ${imgLabel}`;
+      document.getElementById("badgeMode").textContent = `v2.0 AIA × AutoFigure (${cfg.resolved_seg_backend || "auto"} / ${cfg.resolved_matting_backend || "auto"})`;
       svgEditUrl = cfg.svg_edit_url;
 
       const sel = document.getElementById("archetype");
@@ -549,6 +583,14 @@
           <figure><figcaption>最终可编辑纯 SVG 渲染 (final.png)</figcaption><img src="/api/runs/${jobId}/artifacts/final.png${cacheBust}" /></figure>
         `;
         setStage(6, true);
+      } else {
+        const draftRes = await fetch(`/api/runs/${jobId}/artifacts/stage1_draft.png${cacheBust}`);
+        if (draftRes.ok) {
+          document.getElementById("compareWrap").innerHTML = `
+            <figure><figcaption>Stage-4 底图锚点 (stage1_draft.png · 等待确认转 SVG)</figcaption><img src="/api/runs/${jobId}/artifacts/stage1_draft.png${cacheBust}" /></figure>
+          `;
+          setStage(4, false);
+        }
       }
       loadDocTab("qa.md");
     }
@@ -574,6 +616,7 @@
         eventSource.close();
         loadRun(jobId);
         if (d.status === "paused_after_schema") switchTab("schema");
+        else if (d.status === "paused_after_draft") switchTab("compare");
       });
       eventSource.addEventListener("error", e => {
         let errText = "连接中断或任务运行出错，请查看日志。";
@@ -602,22 +645,27 @@
     document.getElementById("runForm").addEventListener("submit", async e => {
       e.preventDefault();
       const pdf = document.getElementById("paperPdf").files[0];
-      if (!pdf) return alert("请先选择论文 PDF 文件！");
+      const fig = document.getElementById("inputFigure").files[0];
+      if (!pdf && !fig) return alert("请先选择论文 PDF 文件，或上传一张现成高清底图！");
 
       const fd = new FormData();
-      fd.append("paper_pdf", pdf);
+      if (pdf) fd.append("paper_pdf", pdf);
+      if (fig) fd.append("input_figure", fig);
       const refs = Array.from(document.getElementById("refFolder").files || []).filter(f => IMG_EXT_RE.test(f.name));
       for (const f of refs) fd.append("ref_images", f);
       fd.append("refs_dir_path", document.getElementById("refsDirPath").value.trim());
       fd.append("lang", document.getElementById("lang").value);
       fd.append("archetype", document.getElementById("archetype").value);
       fd.append("critic_rounds", document.getElementById("criticRounds").value);
+      fd.append("draft_review_rounds", document.getElementById("draftReviewRounds").value);
       fd.append("main_model", document.getElementById("mainModel").value.trim());
       fd.append("reasoning_effort", document.getElementById("reasoningEffort").value);
       fd.append("image_model", document.getElementById("imageModel").value.trim());
       fd.append("svg_mode", document.getElementById("svgMode").value);
+      fd.append("svg_engine", document.getElementById("svgEngine").value);
       fd.append("density", document.getElementById("density").value);
       fd.append("pause_after_schema", document.getElementById("pauseAfterSchema").checked ? "true" : "false");
+      fd.append("pause_after_draft", document.getElementById("pauseAfterDraft").checked ? "true" : "false");
 
       document.getElementById("startBtn").disabled = true;
       document.getElementById("logBox").textContent = "提交任务中...";
@@ -653,6 +701,34 @@
           reasoning_effort: document.getElementById("reasoningEffort").value,
           image_model: document.getElementById("imageModel").value.trim(),
           svg_mode: document.getElementById("svgMode").value,
+          svg_engine: document.getElementById("svgEngine").value,
+          draft_review_rounds: Number(document.getElementById("draftReviewRounds").value),
+          density: document.getElementById("density").value,
+          pause_after_draft: document.getElementById("pauseAfterDraft").checked,
+        }),
+      });
+      if (res.ok) connectSSE(currentJobId);
+      else {
+        log("[ERROR] " + await res.text());
+        document.getElementById("startBtn").disabled = false;
+      }
+    });
+
+    document.getElementById("resumeDraftBtn").addEventListener("click", async () => {
+      if (!currentJobId) return alert("请先选择一个任务！");
+      document.getElementById("startBtn").disabled = true;
+      log("底图已确认，从 Stage 5 进入 AutoFigure-Edit 引擎转可编辑 SVG...");
+      setStage(5, false);
+      const res = await fetch(`/api/runs/${currentJobId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_stage: 5,
+          critic_rounds: Number(document.getElementById("criticRounds").value),
+          main_model: document.getElementById("mainModel").value.trim(),
+          reasoning_effort: document.getElementById("reasoningEffort").value,
+          svg_mode: document.getElementById("svgMode").value,
+          svg_engine: document.getElementById("svgEngine").value,
           density: document.getElementById("density").value,
         }),
       });

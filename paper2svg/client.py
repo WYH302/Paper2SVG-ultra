@@ -1,10 +1,11 @@
-"""Unified OpenAI Responses API client (SSE streaming + configurable reasoning effort) for Paper2SVG-ultra."""
+"""Unified OpenAI Responses API client (SSE streaming + stream-error retry + reasoning effort)."""
 
 from __future__ import annotations
 
 import base64
 import io
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -17,6 +18,20 @@ from .config import Settings
 ImageInput = Union[Path, str, Image.Image]
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 520, 522, 524}
 HARD_QUOTA_MARKERS = ("DAILY_LIMIT_EXCEEDED", "USAGE_LIMIT_EXCEEDED", "insufficient_quota", "quota_exceeded")
+RETRYABLE_STREAM_ERROR_MARKERS = (
+    "service_unavailable_error",
+    "server_error",
+    "overloaded",
+    "rate_limit_exceeded",
+    "temporarily unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "upstream",
+    "timeout",
+    "502",
+    "503",
+    "504",
+)
 
 
 def encode_image_to_data_url(image: ImageInput, max_side: int = 1800) -> str:
@@ -44,10 +59,37 @@ def encode_image_to_data_url(image: ImageInput, max_side: int = 1800) -> str:
     return f"data:image/png;base64,{b64}"
 
 
+def is_retryable_stream_error(err_text: str) -> bool:
+    """Return True when an SSE response.failed / error payload is a transient overload/503 error."""
+    if not err_text:
+        return False
+    if any(marker in err_text for marker in HARD_QUOTA_MARKERS):
+        return False
+    low = err_text.lower()
+    return any(marker in low for marker in RETRYABLE_STREAM_ERROR_MARKERS)
+
+
+def _compute_stream_retry_delay(err_text: str, attempt: int) -> float:
+    """Compute bounded retry delay (max 45s) respecting short retry-after hints when available."""
+    base_delay = min(10.0 * attempt, 40.0)
+    m = re.search(r"retry-after['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)", err_text, re.IGNORECASE)
+    if m:
+        try:
+            hinted = float(m.group(1))
+            if 1.0 <= hinted <= 45.0:
+                return max(base_delay, hinted)
+            if hinted > 45.0:
+                return min(45.0, max(base_delay, 20.0 * attempt))
+        except ValueError:
+            pass
+    return base_delay
+
+
 class ResponsesAPIClient:
     """Resilient SSE-streaming client targeting OpenAI Responses API (/v1/responses).
 
     - Streams continuously via `stream=True` to eliminate Cloudflare 100s HTTP 524 timeouts.
+    - Retries BOTH transient HTTP status codes AND transient SSE `service_unavailable_error` / overload events.
     - Supports `reasoning: {"effort": "xhigh"}` with automatic graceful fallback if a gateway rejects it.
     - Fails fast on hard daily quota errors instead of wasting retry cycles.
     """
@@ -113,7 +155,7 @@ class ResponsesAPIClient:
                                 continue
 
                             if resp.status_code in RETRYABLE_STATUS_CODES and attempt < self.settings.max_retries:
-                                delay = min(8.0 * attempt, 30.0) if resp.status_code == 503 else min(5.0 * attempt, 20.0)
+                                delay = min(10.0 * attempt, 40.0) if resp.status_code == 503 else min(5.0 * attempt, 25.0)
                                 time.sleep(delay)
                                 continue
                             raise RuntimeError(f"Responses API HTTP {resp.status_code}: {body[:800]}")
@@ -157,6 +199,13 @@ class ResponsesAPIClient:
                                 stream_error = str(err_obj)
 
                         if stream_error and not final_response:
+                            if any(marker in stream_error for marker in HARD_QUOTA_MARKERS):
+                                raise RuntimeError(
+                                    f"API 额度已达上限 (SSE stream): {stream_error[:500]}"
+                                )
+                            if is_retryable_stream_error(stream_error) and attempt < self.settings.max_retries:
+                                time.sleep(_compute_stream_retry_delay(stream_error, attempt))
+                                continue
                             raise RuntimeError(f"Responses stream failed: {stream_error[:800]}")
 
                         if final_response is not None:
@@ -169,12 +218,15 @@ class ResponsesAPIClient:
                             assembled["output_text"] = "".join(text_deltas)
                         if assembled["output"] or assembled.get("output_text"):
                             return assembled
+                        if attempt < self.settings.max_retries:
+                            time.sleep(min(6.0 * attempt, 25.0))
+                            continue
                         raise RuntimeError("Responses SSE stream ended without response.completed or output items.")
 
             except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                 last_err = exc
                 if attempt < self.settings.max_retries:
-                    time.sleep(min(5.0 * attempt, 20.0))
+                    time.sleep(min(6.0 * attempt, 25.0))
                     continue
                 raise RuntimeError(f"Responses API network failure after {attempt} attempts: {exc}") from exc
 
@@ -262,24 +314,36 @@ class ResponsesAPIClient:
         prompt: str,
         *,
         reference_images: Optional[list[ImageInput]] = None,
+        edit_target_image: Optional[ImageInput] = None,
         model: Optional[str] = None,
         image_tool_model: Optional[str] = None,
         quality: Optional[str] = None,
         size: Optional[str] = None,
     ) -> tuple[Image.Image, dict[str, Any]]:
-        """Generate a Stage-1 high-craft visual anchor using Responses API built-in image_generation tool
-        with multi-image visual art-direction references.
-        """
+        """Generate or surgically edit a Stage-1 visual anchor via Responses built-in image_generation tool."""
         content_blocks: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+
+        if edit_target_image is not None:
+            content_blocks.append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "[EDIT TARGET FIGURE — APPLY ONLY THE REQUESTED SURGICAL FIXES TO THIS IMAGE; "
+                        "KEEP ALL CORRECT VISUAL ELEMENTS, COMPOSITIONS, AND COLORS INTACT]"
+                    ),
+                }
+            )
+            content_blocks.append({"type": "input_image", "image_url": encode_image_to_data_url(edit_target_image)})
+
         if reference_images:
             for idx, ref_img in enumerate(reference_images, 1):
                 content_blocks.append(
                     {
                         "type": "input_text",
                         "text": (
-                            f"[ART-DIRECTION REFERENCE #{idx} — MIMIC ITS VISUAL CRAFT, ILLUSTRATION RICHNESS, "
-                            "COLOR HARMONY, BORDER/BORDERLESS LANGUAGE, ARROW STYLE & WHITESPACE; "
-                            "DO NOT COPY ANY REFERENCE WORDS OR MODULES]"
+                            f"[STYLE-ONLY ART-DIRECTION REFERENCE #{idx} — MATCH ONLY ITS VISUAL TASTE, "
+                            "CLEAN WHITESPACE, COLOR HARMONY, LINE WEIGHT, AND SCIENTIFIC ILLUSTRATION POLISH; "
+                            "STRICTLY FORBIDDEN TO COPY ANY FACE, PERSON, HAIR COLOR, PHOTO SUBJECT, TEXT, OR MODULES FROM IT!]"
                         ),
                     }
                 )
@@ -303,8 +367,6 @@ class ResponsesAPIClient:
             "tool_choice": {"type": "image_generation"},
             "input": [{"role": "user", "content": content_blocks}],
         }
-        # Note: Do not force heavy reasoning effort onto forced tool_choice image_generation calls;
-        # the image_generation tool handles visual rendering while reasoning effort powers planning/SVG/critic stages.
 
         try:
             data = self._post_responses(payload)
